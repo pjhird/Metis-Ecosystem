@@ -54,8 +54,16 @@ class SQLiteStateStore:
         return bool(row[0])
 
     def initialize(self) -> None:
+        migrations = self._migrations()
         current_version = self.schema_version
-        for migration in self._migrations():
+        latest_version = migrations[-1].version
+        if current_version > latest_version:
+            raise MigrationError(
+                f"database schema version {current_version} is newer than "
+                f"supported version {latest_version}"
+            )
+
+        for migration in migrations:
             if migration.version <= current_version:
                 continue
             self._apply(migration)

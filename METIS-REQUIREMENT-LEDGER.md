@@ -99,7 +99,7 @@ Last reviewed: 2026-07-31 · Repository state at review: build-order step 1
 |---|---|---|---|---|---|
 | REQ-TEST-001 | Critical negative tests exist and pass | BP §11 | Missing | Test plan | The nine tests named in AGENTS.md |
 | REQ-TEST-002 | No capability declared working without a recorded test run | BP §11 | Missing | — | Standing constraint on all reporting, including this ledger |
-| REQ-TEST-003 | Schema validation for every structured artifact | BP §11 | Partial | Schema doc; `001_initial.sql` | All five SQLite tables validated; evidence metadata and note schemas remain unimplemented |
+| REQ-TEST-003 | Schema validation for every structured artifact | BP §11 | Partial | Schema doc; `001_initial.sql` | All five SQLite table structures and SQL-enforced constraints validated; JSON field contents, evidence metadata, and note schemas remain unimplemented |
 
 ## Repository and tooling
 

@@ -69,6 +69,21 @@ EXPECTED_COLUMNS = {
         "created_at",
     ),
 }
+NULLABLE_COLUMNS = {
+    "intake": {"failure_reason"},
+    "classification": set(),
+    "proposal": {"draft_note_path"},
+    "approval": {"committed_at", "revoked_at"},
+    "audit_event": {"capture_id"},
+}
+REAL_COLUMNS = {"confidence"}
+PRIMARY_KEYS = {
+    "intake": "capture_id",
+    "classification": "classification_id",
+    "proposal": "proposal_id",
+    "approval": "approval_id",
+    "audit_event": "event_id",
+}
 
 
 class FakeStateStore:
@@ -94,10 +109,25 @@ class MigrationTests(unittest.TestCase):
         store.initialize()
         return store
 
-    def _columns(self, table: str) -> tuple[str, ...]:
+    def _column_rows(self, table: str) -> list[tuple]:
         with sqlite3.connect(self.database_path) as connection:
-            rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
-        return tuple(row[1] for row in rows)
+            return connection.execute(f"PRAGMA table_info({table})").fetchall()
+
+    def _columns(self, table: str) -> tuple[str, ...]:
+        return tuple(row[1] for row in self._column_rows(table))
+
+    def _assert_column_contract(self, table: str) -> None:
+        rows = self._column_rows(table)
+        self.assertEqual(tuple(row[1] for row in rows), EXPECTED_COLUMNS[table])
+        for _, name, declared_type, not_null, _, primary_key_position in rows:
+            with self.subTest(table=table, column=name):
+                expected_type = "REAL" if name in REAL_COLUMNS else "TEXT"
+                self.assertEqual(declared_type, expected_type)
+                self.assertEqual(bool(not_null), name not in NULLABLE_COLUMNS[table])
+                self.assertEqual(
+                    primary_key_position,
+                    1 if name == PRIMARY_KEYS[table] else 0,
+                )
 
     def _foreign_keys(self, table: str) -> set[tuple[str, str, str]]:
         with sqlite3.connect(self.database_path) as connection:
@@ -124,6 +154,56 @@ class MigrationTests(unittest.TestCase):
             ),
         )
 
+    def _insert_valid_classification(self, connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            INSERT INTO classification (
+                classification_id, capture_id, candidate_type, sensitivity,
+                confidence, routing, model_id, prompt_version,
+                raw_response_path, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "classification-1",
+                "01J8X2K4P7M3QRSTVWXYZ0ABCD",
+                "idea",
+                "normal",
+                0.8,
+                "proposal",
+                "model-1",
+                "prompt-1",
+                "evidence/model-response.json",
+                "2026-07-31T12:00:01Z",
+            ),
+        )
+
+    def _insert_valid_proposal(self, connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            INSERT INTO proposal (
+                proposal_id, capture_id, classification_id, note_type, title,
+                body_path, proposed_links, evidence_refs, confidence, risk_level,
+                reason, draft_note_path, state, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "proposal-1",
+                "01J8X2K4P7M3QRSTVWXYZ0ABCD",
+                "classification-1",
+                "idea",
+                "Title",
+                "proposals/proposal-1.md",
+                "[]",
+                "[]",
+                0.8,
+                "low",
+                "Captured as an idea",
+                None,
+                "pending",
+                "2026-07-31T12:00:02Z",
+            ),
+        )
+
     def test_state_store_contract_is_engine_agnostic(self) -> None:
         self.assertIsInstance(FakeStateStore(), StateStore)
 
@@ -140,13 +220,12 @@ class MigrationTests(unittest.TestCase):
 
     def test_intake_schema_matches_contract(self) -> None:
         self._initialize()
-        self.assertEqual(self._columns("intake"), EXPECTED_COLUMNS["intake"])
+        self._assert_column_contract("intake")
+        self.assertEqual(self._foreign_keys("intake"), set())
 
     def test_classification_schema_matches_contract(self) -> None:
         self._initialize()
-        self.assertEqual(
-            self._columns("classification"), EXPECTED_COLUMNS["classification"]
-        )
+        self._assert_column_contract("classification")
         self.assertEqual(
             self._foreign_keys("classification"),
             {("capture_id", "intake", "capture_id")},
@@ -154,7 +233,7 @@ class MigrationTests(unittest.TestCase):
 
     def test_proposal_schema_matches_contract(self) -> None:
         self._initialize()
-        self.assertEqual(self._columns("proposal"), EXPECTED_COLUMNS["proposal"])
+        self._assert_column_contract("proposal")
         self.assertEqual(
             self._foreign_keys("proposal"),
             {
@@ -165,7 +244,7 @@ class MigrationTests(unittest.TestCase):
 
     def test_approval_schema_matches_contract(self) -> None:
         self._initialize()
-        self.assertEqual(self._columns("approval"), EXPECTED_COLUMNS["approval"])
+        self._assert_column_contract("approval")
         self.assertEqual(
             self._foreign_keys("approval"),
             {("proposal_id", "proposal", "proposal_id")},
@@ -173,7 +252,8 @@ class MigrationTests(unittest.TestCase):
 
     def test_audit_event_schema_matches_contract(self) -> None:
         self._initialize()
-        self.assertEqual(self._columns("audit_event"), EXPECTED_COLUMNS["audit_event"])
+        self._assert_column_contract("audit_event")
+        self.assertEqual(self._foreign_keys("audit_event"), set())
 
     def test_content_hash_uniqueness_is_enforced_by_sqlite(self) -> None:
         self._initialize()
@@ -204,55 +284,159 @@ class MigrationTests(unittest.TestCase):
 
         self.assertTrue(store.foreign_keys_enabled)
 
-    def test_documented_enum_and_confidence_constraints_are_enforced(self) -> None:
+    def test_intake_enums_are_enforced(self) -> None:
         self._initialize()
+        statement = """
+            INSERT INTO intake (
+                capture_id, content_hash, captured_at, source_type,
+                evidence_path, state, state_updated_at, trace_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        valid = [
+            "capture-invalid",
+            "sha256:invalid",
+            "2026-07-31T12:00:00Z",
+            "cli-typed",
+            "evidence/capture-invalid",
+            "captured",
+            "2026-07-31T12:00:00Z",
+            "trace-invalid",
+        ]
 
-        invalid_statements = (
-            (
-                """
-                INSERT INTO classification (
-                    classification_id, capture_id, candidate_type, sensitivity,
-                    confidence, routing, model_id, prompt_version,
-                    raw_response_path, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    "classification-invalid",
-                    "01J8X2K4P7M3QRSTVWXYZ0ABCD",
-                    "idea",
-                    "normal",
-                    1.1,
-                    "proposal",
-                    "model-1",
-                    "prompt-1",
-                    "evidence/model-response.json",
-                    "2026-07-31T12:00:01Z",
-                ),
-            ),
-            (
-                """
-                INSERT INTO audit_event (
-                    event_id, trace_id, actor, action, outcome, detail, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    "event-invalid",
-                    "trace-1",
-                    "orchestrator",
-                    "capture.written",
-                    "unknown",
-                    "{}",
-                    "2026-07-31T12:00:02Z",
-                ),
-            ),
-        )
+        with sqlite3.connect(self.database_path) as connection:
+            for index, invalid_value in ((3, "email"), (5, "complete")):
+                parameters = valid.copy()
+                parameters[index] = invalid_value
+                with self.subTest(index=index, invalid_value=invalid_value):
+                    with self.assertRaises(sqlite3.IntegrityError):
+                        connection.execute(statement, parameters)
+
+    def test_classification_enums_and_confidence_are_enforced(self) -> None:
+        self._initialize()
+        statement = """
+            INSERT INTO classification (
+                classification_id, capture_id, candidate_type, sensitivity,
+                confidence, routing, model_id, prompt_version,
+                raw_response_path, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        valid = [
+            "classification-invalid",
+            "01J8X2K4P7M3QRSTVWXYZ0ABCD",
+            "idea",
+            "normal",
+            0.8,
+            "proposal",
+            "model-1",
+            "prompt-1",
+            "evidence/model-response.json",
+            "2026-07-31T12:00:01Z",
+        ]
 
         with sqlite3.connect(self.database_path) as connection:
             self._insert_valid_intake(connection)
-            for statement, parameters in invalid_statements:
-                with self.subTest(parameters=parameters):
+            for index, invalid_value in (
+                (2, "unknown"),
+                (3, "public"),
+                (4, 1.1),
+            ):
+                parameters = valid.copy()
+                parameters[index] = invalid_value
+                with self.subTest(index=index, invalid_value=invalid_value):
                     with self.assertRaises(sqlite3.IntegrityError):
                         connection.execute(statement, parameters)
+
+    def test_proposal_enums_and_confidence_are_enforced(self) -> None:
+        self._initialize()
+        statement = """
+            INSERT INTO proposal (
+                proposal_id, capture_id, classification_id, note_type, title,
+                body_path, proposed_links, evidence_refs, confidence, risk_level,
+                reason, draft_note_path, state, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        valid = [
+            "proposal-invalid",
+            "01J8X2K4P7M3QRSTVWXYZ0ABCD",
+            "classification-1",
+            "idea",
+            "Title",
+            "proposals/proposal-invalid.md",
+            "[]",
+            "[]",
+            0.8,
+            "low",
+            "Reason",
+            None,
+            "pending",
+            "2026-07-31T12:00:02Z",
+        ]
+
+        with sqlite3.connect(self.database_path) as connection:
+            connection.execute("PRAGMA foreign_keys = ON")
+            self._insert_valid_intake(connection)
+            self._insert_valid_classification(connection)
+            for index, invalid_value in (
+                (3, "unknown"),
+                (8, -0.1),
+                (9, "critical"),
+                (12, "filed"),
+            ):
+                parameters = valid.copy()
+                parameters[index] = invalid_value
+                with self.subTest(index=index, invalid_value=invalid_value):
+                    with self.assertRaises(sqlite3.IntegrityError):
+                        connection.execute(statement, parameters)
+
+    def test_approval_decision_and_human_approver_are_enforced(self) -> None:
+        self._initialize()
+        statement = """
+            INSERT INTO approval (
+                approval_id, proposal_id, decision, approver,
+                observed_status, detected_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+        """
+        valid = [
+            "approval-invalid",
+            "proposal-1",
+            "approved",
+            "human:philly",
+            "approved",
+            "2026-07-31T12:00:03Z",
+        ]
+
+        with sqlite3.connect(self.database_path) as connection:
+            connection.execute("PRAGMA foreign_keys = ON")
+            self._insert_valid_intake(connection)
+            self._insert_valid_classification(connection)
+            self._insert_valid_proposal(connection)
+            for index, invalid_value in ((2, "pending"), (3, "agent:reviewer")):
+                parameters = valid.copy()
+                parameters[index] = invalid_value
+                with self.subTest(index=index, invalid_value=invalid_value):
+                    with self.assertRaises(sqlite3.IntegrityError):
+                        connection.execute(statement, parameters)
+
+    def test_audit_outcome_is_enforced(self) -> None:
+        self._initialize()
+        statement = """
+            INSERT INTO audit_event (
+                event_id, trace_id, actor, action, outcome, detail, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """
+        parameters = (
+            "event-invalid",
+            "trace-1",
+            "orchestrator",
+            "capture.written",
+            "unknown",
+            "{}",
+            "2026-07-31T12:00:02Z",
+        )
+
+        with sqlite3.connect(self.database_path) as connection:
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(statement, parameters)
 
     def test_reapplying_migrations_is_idempotent(self) -> None:
         store = self._initialize()
@@ -313,6 +497,19 @@ class MigrationTests(unittest.TestCase):
         self.addCleanup(store.close)
 
         with self.assertRaisesRegex(MigrationError, "expected migration 002"):
+            store.initialize()
+
+    def test_newer_database_schema_fails_closed(self) -> None:
+        self.database_path.parent.mkdir(parents=True)
+        with sqlite3.connect(self.database_path) as connection:
+            connection.execute("PRAGMA user_version = 2")
+        store = SQLiteStateStore(self.database_path)
+        self.addCleanup(store.close)
+
+        with self.assertRaisesRegex(
+            MigrationError,
+            "database schema version 2 is newer than supported version 1",
+        ):
             store.initialize()
 
 
