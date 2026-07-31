@@ -179,7 +179,7 @@ stop — do not build it.
 To be filled in as they are created. Keep this section accurate; it is the first thing a new session reads.
 
 ```
-metis capture "<text>"     # not yet implemented
+metis capture "<text>"     # immutable typed capture with exact replay protection
 metis approvals            # not yet implemented
 metis status               # not yet implemented
 ```

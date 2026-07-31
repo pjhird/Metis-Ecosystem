@@ -13,12 +13,13 @@ Status vocabulary is the blueprint's own:
 - **Missing** — no artifact exists yet
 - **Superseded** — replaced by a later decision
 
-Step 1 has verified only the repository entrypoints, clean-checkout test setup, and current data-access
-boundary. No capture, vault, model, orchestration, approval, filing, or audit behavior is Verified. A
+Step 1 verified only the repository entrypoints, clean-checkout test setup, and current data-access boundary.
+Step 2 adds partial evidence for immutable typed capture and exact replay protection; it does not verify a
+permanent note, classification, vault, model, orchestration, approval, filing, linking, or audit behavior. A
 requirement moves to Verified only when a test run or observed behavior proves it — never because a document
 mentions it.
 
-Last reviewed: 2026-07-31 · Repository state at review: build-order step 1
+Last reviewed: 2026-07-31 · Repository state at review: build-order step 2
 
 ---
 
@@ -46,11 +47,11 @@ Last reviewed: 2026-07-31 · Repository state at review: build-order step 1
 
 | ID | Requirement | Source | Status | Design artifact | Evidence needed |
 |---|---|---|---|---|---|
-| REQ-INTK-001 | Capture preserves input immutably before any processing | BP §9, §11 | Missing | ADR-003, ADR-015 | Test: evidence written before classification runs |
-| REQ-INTK-002 | Replaying the same input creates no duplicate permanent record | BP §9, §11 | Missing | ADR-014 | `duplicate_replay_creates_one_note` |
+| REQ-INTK-001 | Capture preserves input immutably before any processing | BP §9, §11 | Partial | ADR-003, ADR-015 | Byte-exact evidence, SHA-256 metadata, and metadata contract: `test_create_preserves_raw_bytes_exactly`, `test_content_hash_matches_fresh_sha256_of_raw`, `test_create_writes_exact_metadata_contract`; evidence finalizes before registration: `test_evidence_is_finalized_before_registration`. Still needed for Verified: evidence surviving a later classification stage, which is not built. |
+| REQ-INTK-002 | Replaying the same input creates no duplicate permanent record | BP §9, §11 | Partial | ADR-014 | Exact replay leaves one intake row and one evidence directory: `test_exact_replay_creates_one_row_and_one_evidence_directory`; matching state and evidence return `duplicate`: `test_exact_replay_returns_duplicate_for_matching_state_and_evidence`. Still needed for Verified: `duplicate_replay_creates_one_note` after permanent-note filing exists. |
 | REQ-INTK-003 | Classification produces candidate type, sensitivity, routing, confidence | MP §24, BP §9 | Missing | `classification` table | Fixture test asserting shape and confidence bounds |
 | REQ-INTK-004 | Approved intake links to an existing goal or project without duplicates or orphans | BP §13, Phase 6 | Missing | ADR-013, note schemas | `unresolvable_link_blocks_commit` |
-| REQ-INTK-005 | Failure preserves the source and produces a visible review state, never a false "complete" | BP §9, §11 | Missing | State machine failure states | `source_survives_classification_failure` |
+| REQ-INTK-005 | Failure preserves the source and produces a visible review state, never a false "complete" | BP §9, §11 | Partial | State machine failure states | Registration failure preserves finalized evidence: `test_registration_failure_preserves_finalized_evidence`; a complete orphan is reused safely on retry: `test_complete_orphan_is_reused_after_registration_failure`. Still needed for Verified: `source_survives_classification_failure` and a visible review state; classification and review are not built. |
 
 ## Orchestration
 
@@ -99,7 +100,7 @@ Last reviewed: 2026-07-31 · Repository state at review: build-order step 1
 |---|---|---|---|---|---|
 | REQ-TEST-001 | Critical negative tests exist and pass | BP §11 | Missing | Test plan | The nine tests named in AGENTS.md |
 | REQ-TEST-002 | No capability declared working without a recorded test run | BP §11 | Missing | — | Standing constraint on all reporting, including this ledger |
-| REQ-TEST-003 | Schema validation for every structured artifact | BP §11 | Partial | Schema doc; `001_initial.sql` | All five SQLite table structures and SQL-enforced constraints validated; JSON field contents, evidence metadata, and note schemas remain unimplemented |
+| REQ-TEST-003 | Schema validation for every structured artifact | BP §11 | Partial | Schema doc; `001_initial.sql` | All five SQLite table structures and SQL-enforced constraints validated; evidence metadata contract validation: `test_create_writes_exact_metadata_contract`, `test_validation_rejects_invalid_metadata_key_set`, `test_validation_rejects_metadata_values_that_disagree_with_evidence`; other JSON field contents and note schemas remain unimplemented |
 
 ## Repository and tooling
 
