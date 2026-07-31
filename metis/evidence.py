@@ -167,6 +167,29 @@ class EvidenceStore:
             meta_path=meta_path,
         )
 
+    def find_by_content_hash(self, content_hash: str) -> Optional[EvidenceRecord]:
+        """Find exactly one valid evidence record with the requested content hash."""
+        if not self._evidence_root.exists():
+            return None
+
+        try:
+            if not self._evidence_root.is_dir() or self._evidence_root.is_symlink():
+                raise ValueError("evidence root is not a directory")
+            children = sorted(self._evidence_root.iterdir(), key=lambda path: path.name)
+        except (OSError, ValueError) as error:
+            raise EvidenceConsistencyError(
+                f"evidence consistency check failed for {self._evidence_root}: {error}",
+                "evidence",
+            ) from error
+
+        records = [self.validate_directory(child) for child in children]
+        matches = [record for record in records if record.content_hash == content_hash]
+        if len(matches) > 1:
+            raise EvidenceConsistencyError(
+                f"multiple evidence records match content hash: {content_hash}"
+            )
+        return matches[0] if matches else None
+
     def _validated_capture_id(self, directory: Path) -> str:
         from uuid import UUID
 

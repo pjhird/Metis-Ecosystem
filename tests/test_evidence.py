@@ -61,6 +61,47 @@ class EvidenceStoreTests(unittest.TestCase):
 
         self.assertEqual(self.store.validate_directory(created.directory), created)
 
+    def test_find_by_content_hash_returns_none_without_evidence_root(self) -> None:
+        self.assertIsNone(self.store.find_by_content_hash(CONTENT_HASH))
+
+    def test_find_by_content_hash_returns_none_without_a_match(self) -> None:
+        self.store.create(CAPTURE_ID, RAW_BYTES, CONTENT_HASH, CAPTURED_AT)
+
+        self.assertIsNone(self.store.find_by_content_hash("sha256:" + "0" * 64))
+
+    def test_find_by_content_hash_returns_one_valid_match(self) -> None:
+        expected = self.store.create(CAPTURE_ID, RAW_BYTES, CONTENT_HASH, CAPTURED_AT)
+
+        self.assertEqual(self.store.find_by_content_hash(CONTENT_HASH), expected)
+
+    def test_find_by_content_hash_rejects_multiple_matches(self) -> None:
+        self.store.create(CAPTURE_ID, RAW_BYTES, CONTENT_HASH, CAPTURED_AT)
+        self.store.create(
+            "6ba7b810-9dad-41d1-80b4-00c04fd430c8",
+            RAW_BYTES,
+            CONTENT_HASH,
+            "2026-07-31T20:01:00Z",
+        )
+
+        with self.assertRaises(EvidenceConsistencyError):
+            self.store.find_by_content_hash(CONTENT_HASH)
+
+    def test_find_by_content_hash_fails_closed_on_partial_directory(self) -> None:
+        partial = self.runtime_root / "evidence" / CAPTURE_ID
+        partial.mkdir(parents=True)
+        (partial / "raw.txt").write_bytes(RAW_BYTES)
+
+        with self.assertRaises(EvidenceConsistencyError):
+            self.store.find_by_content_hash(CONTENT_HASH)
+
+    def test_find_by_content_hash_fails_closed_on_non_directory_child(self) -> None:
+        evidence_root = self.runtime_root / "evidence"
+        evidence_root.mkdir()
+        (evidence_root / "unexpected-file").write_text("unexpected", encoding="utf-8")
+
+        with self.assertRaises(EvidenceConsistencyError):
+            self.store.find_by_content_hash(CONTENT_HASH)
+
     def test_existing_capture_directory_is_never_overwritten(self) -> None:
         directory = self.runtime_root / "evidence" / CAPTURE_ID
         directory.mkdir(parents=True)
