@@ -64,6 +64,15 @@ class EvidenceStoreTests(unittest.TestCase):
     def test_find_by_content_hash_returns_none_without_evidence_root(self) -> None:
         self.assertIsNone(self.store.find_by_content_hash(CONTENT_HASH))
 
+    def test_find_by_content_hash_fails_closed_on_dangling_evidence_root_symlink(
+        self,
+    ) -> None:
+        evidence_root = self.runtime_root / "evidence"
+        evidence_root.symlink_to(self.runtime_root / "missing-evidence-root")
+
+        with self.assertRaises(EvidenceConsistencyError):
+            self.store.find_by_content_hash(CONTENT_HASH)
+
     def test_find_by_content_hash_returns_none_without_a_match(self) -> None:
         self.store.create(CAPTURE_ID, RAW_BYTES, CONTENT_HASH, CAPTURED_AT)
 

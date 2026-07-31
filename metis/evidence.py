@@ -169,11 +169,12 @@ class EvidenceStore:
 
     def find_by_content_hash(self, content_hash: str) -> Optional[EvidenceRecord]:
         """Find exactly one valid evidence record with the requested content hash."""
-        if not self._evidence_root.exists():
-            return None
-
         try:
-            if not self._evidence_root.is_dir() or self._evidence_root.is_symlink():
+            if self._evidence_root.is_symlink():
+                raise ValueError("evidence root is not a directory")
+            if not self._evidence_root.exists():
+                return None
+            if not self._evidence_root.is_dir():
                 raise ValueError("evidence root is not a directory")
             children = sorted(self._evidence_root.iterdir(), key=lambda path: path.name)
         except (OSError, ValueError) as error:
