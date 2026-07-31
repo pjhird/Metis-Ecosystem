@@ -3,7 +3,9 @@
 > The information and state model required by [METIS-EXECUTION-BLUEPRINT.md](METIS-EXECUTION-BLUEPRINT.md)
 > Phase 1. Decisions referenced are in [METIS-DECISIONS.md](METIS-DECISIONS.md).
 >
-> This is a design document. No table, file, or note described here exists yet.
+> The five operational-state tables are implemented by
+> `metis/data_access/migrations/001_initial.sql`. The evidence files and Obsidian notes described here remain
+> unimplemented.
 
 ## Scope
 

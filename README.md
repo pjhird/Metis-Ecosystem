@@ -1,8 +1,8 @@
 # Metis Ecosystem
 
-Metis is a standalone documentation foundation for a personal AI knowledge, agent, and execution operating system.
+Metis is a documentation and code foundation for a personal AI knowledge, agent, and execution operating system.
 
-It contains the original governing prompt in readable Markdown, an execution blueprint for implementing it safely, and the design artifacts settled since: architecture decisions, a requirement ledger, the information and state model, and the repository ground rules. It is intentionally separate from any existing Obsidian vault or software project.
+It contains the original governing prompt in readable Markdown, an execution blueprint for implementing it safely, the settled design artifacts, and the first implementation layer: an engine-neutral state-store contract, versioned SQLite schema migrations, and a standard-library test harness. It remains intentionally separate from any existing Obsidian vault or software project.
 
 ## Start Here
 
@@ -15,11 +15,11 @@ Read the documents in this order:
 5. [Metis Requirement Ledger](METIS-REQUIREMENT-LEDGER.md) — every requirement with an ID, its status, and the evidence needed to prove it.
 6. [AGENTS.md](AGENTS.md) — the repository ground rules, read first by whichever coding tool is driving.
 
-The master prompt says **what the ecosystem is intended to become**. The blueprint explains **how to begin building it without pretending the whole system already exists**. The decisions, schemas, and ledger record **what has actually been settled**, and the ledger is explicit that nothing has yet been proven.
+The master prompt says **what the ecosystem is intended to become**. The blueprint explains **how to begin building it without pretending the whole system already exists**. The decisions, schemas, and ledger record **what has actually been settled and which foundation requirements have test evidence**.
 
 ## What Exists Today
 
-This folder is a documentation and design package. It does not claim that the described software, agents, integrations, databases, or workflows have been implemented.
+This folder contains the documentation package and build-order step 1. It does not claim that the capture loop, vault, agents, integrations, or workflows have been implemented.
 
 | Artifact | Status |
 |---|---|
@@ -27,9 +27,10 @@ This folder is a documentation and design package. It does not claim that the de
 | Execution strategy | Complete initial blueprint |
 | Architecture decisions | 18 recorded — 10 adopted, 8 deferred with triggers |
 | Information and state model | Phase 1 design complete |
-| Requirement ledger | Populated; **nothing verified** |
-| Repository ground rules | `AGENTS.md` drafted |
-| Metis application code | Not yet implemented |
+| Requirement ledger | Populated; foundation evidence recorded, later capabilities still Missing or Deferred |
+| Repository ground rules | `AGENTS.md`, `CLAUDE.md`, ignore rules, and `CODEOWNERS` present |
+| Metis application code | Step 1 only: data-access contract and versioned SQLite schema migrations |
+| Test harness | Standard-library `unittest`; schema, migration, and SQL-boundary coverage |
 | Obsidian vault | Not created or modified by this package |
 | Runtime agents and integrations | Not yet implemented |
 
@@ -54,6 +55,16 @@ The initial MVP is one safe intake loop:
 
 Build and prove this path before expanding into a broad agent ecosystem. The build order is in [AGENTS.md](AGENTS.md).
 
+## Development Check
+
+The step-1 application and tests use only Python's standard library. From the repository root, run:
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+Tests create SQLite databases only in temporary directories. Runtime databases, evidence, vault content, environment files, and generated Python artifacts are ignored by Git.
+
 ## How Claude Code and Codex Get the Information
 
 A coding tool does not automatically know the contents of any chat, the source PDF, or files outside its working directory.
@@ -62,7 +73,7 @@ To use Metis:
 
 1. Open a terminal in this folder.
 2. Start your coding tool from here.
-3. Point it at `AGENTS.md` first — it links to everything else.
+3. Codex and Cursor read `AGENTS.md`; Claude Code loads `CLAUDE.md`, which imports the same file.
 4. Review its plan before authorizing any implementation.
 
 Because all Metis documents are inside the working folder, the tool can read them when instructed. Keep the governing documents separate from the instruction file; `AGENTS.md` should stay short and link outward rather than embedding strategy.
