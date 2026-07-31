@@ -35,7 +35,7 @@ evidence/
 
 ```json
 {
-  "capture_id": "01J8X2K4P7M3QRSTVWXYZ0ABCD",
+  "capture_id": "8f14e45f-ea3c-4f7a-9f2d-6c8b5a1d3e70",
   "content_hash": "sha256:9f2b...c41e",
   "captured_at": "2026-07-28T22:41:07Z",
   "source_type": "cli-typed",
@@ -50,7 +50,8 @@ Rules:
 
 - Written **before** anything interprets the input (REQ-INTK-001).
 - Never modified after creation. Corrections create new captures that supersede, never overwrite.
-- `capture_id` is a ULID — sortable by creation time, which makes the directory listing chronological.
+- `capture_id` is a UUID4 generated only for genuinely new evidence.
+- UUID4 capture identifiers are stable handles, not chronological sort keys.
 - `content_hash` is computed over the raw bytes only, not the metadata.
 
 ---
@@ -63,7 +64,7 @@ One row per capture. The spine of the loop.
 
 | Column | Type | Notes |
 |---|---|---|
-| `capture_id` | TEXT PK | ULID, matches the evidence directory |
+| `capture_id` | TEXT PK | UUID4, matches the evidence directory |
 | `content_hash` | TEXT **UNIQUE** | ADR-014 — the uniqueness constraint *is* the replay protection |
 | `captured_at` | TEXT | ISO-8601 UTC |
 | `source_type` | TEXT | `cli-typed` for now |
@@ -225,8 +226,8 @@ status: proposed        # proposed · approved · rejected   ← ADR-005: the ap
 verification: unverified # unverified · verified
 created: 2026-07-28
 approved: null          # timestamp, set on commit
-capture_id: 01J8X2K4P7M3QRSTVWXYZ0ABCD
-evidence: evidence/01J8X2K4P7M3QRSTVWXYZ0ABCD/raw.txt
+capture_id: 8f14e45f-ea3c-4f7a-9f2d-6c8b5a1d3e70
+evidence: evidence/8f14e45f-ea3c-4f7a-9f2d-6c8b5a1d3e70/raw.txt
 confidence: 0.82
 sensitivity: normal
 links:
