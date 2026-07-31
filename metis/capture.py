@@ -55,7 +55,16 @@ class CaptureService:
         self._clock = clock
 
     def capture(self, text: str) -> CaptureResult:
-        raw_bytes = text.encode("utf-8")
+        try:
+            raw_bytes = text.encode("utf-8")
+        except UnicodeEncodeError as error:
+            return CaptureResult(
+                CaptureStatus.FAILED,
+                None,
+                None,
+                "utf8_encoding_failed",
+                str(error),
+            )
         content_hash = "sha256:" + hashlib.sha256(raw_bytes).hexdigest()
 
         try:
@@ -137,7 +146,7 @@ class CaptureService:
         except EvidenceConsistencyError as error:
             return CaptureResult(
                 CaptureStatus.FAILED,
-                None,
+                capture_id,
                 error.evidence_path,
                 "evidence_inconsistent",
                 str(error),

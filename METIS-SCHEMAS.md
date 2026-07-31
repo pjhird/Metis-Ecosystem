@@ -4,8 +4,8 @@
 > Phase 1. Decisions referenced are in [METIS-DECISIONS.md](METIS-DECISIONS.md).
 >
 > The five operational-state tables are implemented by
-> `metis/data_access/migrations/001_initial.sql`. The evidence files and Obsidian notes described here remain
-> unimplemented.
+> `metis/data_access/migrations/001_initial.sql`. Evidence storage is implemented; the Obsidian notes described
+> here remain unimplemented.
 
 ## Scope
 

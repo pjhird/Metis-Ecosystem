@@ -13,3 +13,6 @@ metis = "metis.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["metis*"]
+
+[tool.setuptools.package-data]
+"metis.data_access" = ["migrations/*.sql"]

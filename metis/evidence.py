@@ -105,10 +105,6 @@ class EvidenceStore:
             with meta_path.open("x", encoding="utf-8") as stream:
                 json.dump(metadata, stream, indent=2, sort_keys=True)
                 stream.write("\n")
-        except FileExistsError as error:
-            raise EvidenceCollision(
-                f"evidence target already exists: {directory}", evidence_path
-            ) from error
         except OSError as error:
             raise EvidenceWriteError(
                 f"evidence write failed for {directory}: {error}", evidence_path

@@ -5,12 +5,15 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from metis.evidence import (
     EvidenceCollision,
     EvidenceConsistencyError,
+    EvidenceError,
     EvidenceRecord,
     EvidenceStore,
+    EvidenceWriteError,
 )
 
 
@@ -122,6 +125,51 @@ class EvidenceStoreTests(unittest.TestCase):
 
         self.assertEqual(original.read_bytes(), b"original")
         self.assertFalse((directory / "meta.json").exists())
+
+    def test_raw_file_collision_after_directory_creation_is_write_failure(
+        self,
+    ) -> None:
+        directory = self.runtime_root / "evidence" / CAPTURE_ID
+        raw_path = directory / "raw.txt"
+        original_mkdir = Path.mkdir
+
+        def mkdir_then_create_raw(path: Path, *args: object, **kwargs: object) -> None:
+            original_mkdir(path, *args, **kwargs)
+            if path == directory:
+                raw_path.write_bytes(b"raced raw evidence")
+
+        with patch.object(Path, "mkdir", new=mkdir_then_create_raw):
+            with self.assertRaises(EvidenceError) as raised:
+                self.store.create(CAPTURE_ID, RAW_BYTES, CONTENT_HASH, CAPTURED_AT)
+
+        self.assertIsInstance(raised.exception, EvidenceWriteError)
+        self.assertEqual(raised.exception.evidence_path, f"evidence/{CAPTURE_ID}")
+        self.assertEqual(raw_path.read_bytes(), b"raced raw evidence")
+        self.assertFalse((directory / "meta.json").exists())
+
+    def test_metadata_file_collision_after_raw_write_is_write_failure(self) -> None:
+        directory = self.runtime_root / "evidence" / CAPTURE_ID
+        raw_path = directory / "raw.txt"
+        meta_path = directory / "meta.json"
+        original_open = Path.open
+
+        def open_with_meta_collision(
+            path: Path, *args: object, **kwargs: object
+        ) -> object:
+            mode = args[0] if args else kwargs.get("mode", "r")
+            if path == meta_path and mode == "x" and not meta_path.exists():
+                with original_open(meta_path, "w", encoding="utf-8") as stream:
+                    stream.write("raced metadata")
+            return original_open(path, *args, **kwargs)
+
+        with patch.object(Path, "open", new=open_with_meta_collision):
+            with self.assertRaises(EvidenceError) as raised:
+                self.store.create(CAPTURE_ID, RAW_BYTES, CONTENT_HASH, CAPTURED_AT)
+
+        self.assertIsInstance(raised.exception, EvidenceWriteError)
+        self.assertEqual(raised.exception.evidence_path, f"evidence/{CAPTURE_ID}")
+        self.assertEqual(raw_path.read_bytes(), RAW_BYTES)
+        self.assertEqual(meta_path.read_text(encoding="utf-8"), "raced metadata")
 
     def test_validation_rejects_invalid_directory_names(self) -> None:
         created = self.store.create(CAPTURE_ID, RAW_BYTES, CONTENT_HASH, CAPTURED_AT)

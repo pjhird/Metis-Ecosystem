@@ -6,6 +6,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
+from unittest.mock import patch
 from uuid import UUID
 
 from metis.capture import CaptureResult, CaptureService, CaptureStatus
@@ -17,7 +18,12 @@ from metis.data_access import (
     StateStore,
     StateStoreError,
 )
-from metis.evidence import EvidenceRecord, EvidenceStore, EvidenceWriteError
+from metis.evidence import (
+    EvidenceConsistencyError,
+    EvidenceRecord,
+    EvidenceStore,
+    EvidenceWriteError,
+)
 
 
 CAPTURE_ID = UUID("8f14e45f-ea3c-4f7a-9f2d-6c8b5a1d3e70")
@@ -145,6 +151,14 @@ class WriteFailingEvidenceStore(EvidenceStore):
         )
 
 
+class ValidationFailingEvidenceStore(EvidenceStore):
+    def validate_directory(self, directory: Path) -> EvidenceRecord:
+        raise EvidenceConsistencyError(
+            "simulated finalized-evidence validation failure",
+            f"evidence/{directory.name}",
+        )
+
+
 class FinalizationCheckingStateStore(InMemoryStateStore):
     def __init__(
         self,
@@ -223,6 +237,20 @@ class CaptureServiceTests(unittest.TestCase):
             expected_bytes,
         )
         self.assertEqual(self.state_store.record.content_hash, expected_hash)
+
+    def test_unencodable_text_returns_failed_before_evidence_access(self) -> None:
+        result = self._capture(
+            self._service(LookupFailingStateStore()),
+            "invalid surrogate: \ud800",
+        )
+
+        self.assertEqual(result.status, CaptureStatus.FAILED)
+        self.assertIsNone(result.capture_id)
+        self.assertIsNone(result.evidence_path)
+        self.assertEqual(result.reason, "utf8_encoding_failed")
+        self.assertIsInstance(result.message, str)
+        self.assertTrue(result.message)
+        self.assertFalse((self.runtime_root / "evidence").exists())
 
     def test_evidence_is_finalized_before_registration(self) -> None:
         state_store = FinalizationCheckingStateStore(
@@ -364,6 +392,29 @@ class CaptureServiceTests(unittest.TestCase):
         self.assertEqual(result.reason, "evidence_collision")
         self.assertEqual(self._snapshot(existing), before)
 
+    def test_raw_collision_after_directory_creation_is_failed_and_preserved(
+        self,
+    ) -> None:
+        directory = self.runtime_root / "evidence" / str(CAPTURE_ID)
+        raw_path = directory / "raw.txt"
+        original_mkdir = Path.mkdir
+
+        def mkdir_then_create_raw(path: Path, *args: object, **kwargs: object) -> None:
+            original_mkdir(path, *args, **kwargs)
+            if path == directory:
+                raw_path.write_bytes(b"raced raw evidence")
+
+        with patch.object(Path, "mkdir", new=mkdir_then_create_raw):
+            result = self._capture(self._service(self.state_store), "new content")
+
+        self.assertEqual(result.status, CaptureStatus.FAILED)
+        self.assertEqual(result.capture_id, str(CAPTURE_ID))
+        self.assertEqual(result.evidence_path, f"evidence/{CAPTURE_ID}")
+        self.assertEqual(result.reason, "evidence_write_failed")
+        self.assertEqual(raw_path.read_bytes(), b"raced raw evidence")
+        self.assertFalse((directory / "meta.json").exists())
+        self.assertIsNone(self.state_store.record)
+
     def test_evidence_write_failure_returns_failed_without_mutation(self) -> None:
         evidence_store = WriteFailingEvidenceStore(self.runtime_root)
 
@@ -377,6 +428,28 @@ class CaptureServiceTests(unittest.TestCase):
         self.assertEqual(result.evidence_path, f"evidence/{CAPTURE_ID}")
         self.assertEqual(result.reason, "evidence_write_failed")
         self.assertFalse((self.runtime_root / "evidence").exists())
+
+    def test_validation_failure_after_create_preserves_generated_capture_id(
+        self,
+    ) -> None:
+        evidence_store = ValidationFailingEvidenceStore(self.runtime_root)
+
+        result = self._capture(
+            self._service(self.state_store, evidence_store),
+            "validation failure",
+        )
+
+        self.assertEqual(result.status, CaptureStatus.FAILED)
+        self.assertEqual(result.capture_id, str(CAPTURE_ID))
+        self.assertEqual(result.evidence_path, f"evidence/{CAPTURE_ID}")
+        self.assertEqual(result.reason, "evidence_inconsistent")
+        directory = self.runtime_root / result.evidence_path
+        self.assertEqual(
+            (directory / "raw.txt").read_bytes(),
+            b"validation failure",
+        )
+        self.assertTrue((directory / "meta.json").is_file())
+        self.assertIsNone(self.state_store.record)
 
     def test_state_lookup_failure_precedes_evidence_scan_and_factories(self) -> None:
         evidence_store = EvidenceStore(self.runtime_root)
