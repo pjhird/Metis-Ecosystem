@@ -1,6 +1,20 @@
 """Operational-state interface and SQLite implementation."""
 
-from .contracts import StateStore
+from .contracts import (
+    IntakeRecord,
+    IntakeRegistrationResult,
+    IntakeRegistrationStatus,
+    StateStore,
+    StateStoreError,
+)
 from .sqlite import MigrationError, SQLiteStateStore
 
-__all__ = ["MigrationError", "SQLiteStateStore", "StateStore"]
+__all__ = [
+    "IntakeRecord",
+    "IntakeRegistrationResult",
+    "IntakeRegistrationStatus",
+    "MigrationError",
+    "SQLiteStateStore",
+    "StateStore",
+    "StateStoreError",
+]
