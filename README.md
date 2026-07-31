@@ -63,7 +63,7 @@ The step-2 application and tests use only Python's standard library and require 
 python3 -m unittest discover -s tests -v
 ```
 
-The recorded Step-2 verification used Python 3.13.13 (`PATH=/opt/miniconda3/bin:/usr/bin:/bin python3`) and ran 69 tests with final `OK`. Tests create SQLite databases only in temporary directories. Runtime databases, evidence, vault content, environment files, and generated Python artifacts are ignored by Git.
+The recorded Step-2 verification used Python 3.13.13 (`PATH=/opt/miniconda3/bin:/usr/bin:/bin python3`) and ran 77 tests with final `OK`. Tests create SQLite databases only in temporary directories. Runtime databases, evidence, vault content, environment files, and generated Python artifacts are ignored by Git.
 
 ## Typed Capture
 
