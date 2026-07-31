@@ -34,6 +34,12 @@ class RepositorySkeletonTests(unittest.TestCase):
         self.assertTrue((REPOSITORY_ROOT / "AGENTS.md").is_file())
         self.assertTrue((REPOSITORY_ROOT / "CLAUDE.md").is_file())
         self.assertTrue((REPOSITORY_ROOT / ".github" / "CODEOWNERS").is_file())
+        claude_lines = [
+            line.strip()
+            for line in (REPOSITORY_ROOT / "CLAUDE.md").read_text().splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(claude_lines[0], "@AGENTS.md")
         self.assertLessEqual(
             len((REPOSITORY_ROOT / "AGENTS.md").read_text().splitlines()),
             200,

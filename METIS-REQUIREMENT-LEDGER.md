@@ -13,10 +13,12 @@ Status vocabulary is the blueprint's own:
 - **Missing** — no artifact exists yet
 - **Superseded** — replaced by a later decision
 
-**Nothing in this ledger is Verified.** No code, repository, or vault exists. A requirement moves to Verified
-only when a test run or observed behavior proves it — never because a document mentions it.
+Step 1 has verified only the repository entrypoints, clean-checkout test setup, and current data-access
+boundary. No capture, vault, model, orchestration, approval, filing, or audit behavior is Verified. A
+requirement moves to Verified only when a test run or observed behavior proves it — never because a document
+mentions it.
 
-Last reviewed: 2026-07-28 · Repository state at review: empty
+Last reviewed: 2026-07-31 · Repository state at review: build-order step 1
 
 ---
 
@@ -36,7 +38,7 @@ Last reviewed: 2026-07-28 · Repository state at review: empty
 |---|---|---|---|---|---|
 | REQ-DATA-001 | Four-layer separation: evidence, knowledge, operational state, development system | BP §3 | Missing | ADR-001, ADR-002, ADR-003 | Directory and schema inspection |
 | REQ-DATA-002 | Secrets excluded from all four layers | MP §31, BP §3 | Missing | ADR-017 | Secret-scanning check in CI |
-| REQ-DATA-003 | State access abstracted so the engine is swappable | BP §7, §16 | Missing | ADR-002, ADR-012 | `sql_appears_only_in_data_layer` |
+| REQ-DATA-003 | State access abstracted so the engine is swappable | BP §7, §16 | Verified | `StateStore`, `SQLiteStateStore`, ADR-002, ADR-012 | `test_state_store_contract_is_engine_agnostic`; `test_sql_appears_only_in_data_layer` |
 | REQ-DATA-004 | Knowledge lifecycle: raw → capture → proposal → review → approved note → verification → archive | BP §8 | Missing | Schema doc state machine | End-to-end test |
 | REQ-DATA-005 | Unverified content stays visibly unverified | BP §11 | Missing | `verification` field on note schema | Test: an approved note carries its verification state honestly |
 
@@ -97,15 +99,15 @@ Last reviewed: 2026-07-28 · Repository state at review: empty
 |---|---|---|---|---|---|
 | REQ-TEST-001 | Critical negative tests exist and pass | BP §11 | Missing | Test plan | The nine tests named in AGENTS.md |
 | REQ-TEST-002 | No capability declared working without a recorded test run | BP §11 | Missing | — | Standing constraint on all reporting, including this ledger |
-| REQ-TEST-003 | Schema validation for every structured artifact | BP §11 | Missing | Schema doc | Validation suite |
+| REQ-TEST-003 | Schema validation for every structured artifact | BP §11 | Partial | Schema doc; `001_initial.sql` | All five SQLite tables validated; evidence metadata and note schemas remain unimplemented |
 
 ## Repository and tooling
 
 | ID | Requirement | Source | Status | Design artifact | Evidence needed |
 |---|---|---|---|---|---|
-| REQ-REPO-001 | Concise governing instruction file readable by the tools in use | BP §4 | Missing | ADR-009, AGENTS.md | File exists and is under ~200 lines |
+| REQ-REPO-001 | Concise governing instruction file readable by the tools in use | BP §4 | Verified | ADR-009, `AGENTS.md`, `CLAUDE.md` | `test_governance_entrypoints_exist` |
 | REQ-REPO-002 | Directories created only as the active phase needs them | BP §6 | Missing | — | Review at each phase |
-| REQ-REPO-003 | Setup works from a clean checkout | BP Phase 2 | Missing | — | Fresh-clone test |
+| REQ-REPO-003 | Setup works from a clean checkout | BP Phase 2 | Verified | Standard-library test harness | Fresh-clone run: `python3 -m unittest discover -s tests -v` |
 
 ---
 
