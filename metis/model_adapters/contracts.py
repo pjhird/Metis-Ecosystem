@@ -51,3 +51,6 @@ class UnsupportedModelResponse(ModelAdapterError):
 class ModelAdapter(Protocol):
     def classify(self, prompt: str) -> ModelResponse:
         """Return exact assistant text and the actual model ID."""
+
+    def propose(self, prompt: str) -> ModelResponse:
+        """Return exact assistant text and the actual model ID."""

@@ -11,12 +11,20 @@ from metis.model_adapters import (
     ModelResponseTruncated,
     UnsupportedModelResponse,
 )
-from metis.prompts import PROMPT_VERSION, load_classification_prompt
+from metis.prompts import (
+    PROMPT_VERSION,
+    PROPOSAL_PROMPT_VERSION,
+    load_classification_prompt,
+    load_proposal_prompt,
+)
 
 
 class FakeAdapter:
     def classify(self, prompt: str) -> ModelResponse:
         return ModelResponse("test-model", '{"candidate_type":"idea"}')
+
+    def propose(self, prompt: str) -> ModelResponse:
+        return ModelResponse("test-model", '{"title":"Review me"}')
 
 
 class ModelContractTests(unittest.TestCase):
@@ -27,6 +35,15 @@ class ModelContractTests(unittest.TestCase):
         self.assertEqual(
             adapter.classify("prompt"),
             ModelResponse("test-model", '{"candidate_type":"idea"}'),
+        )
+
+    def test_model_adapter_contract_includes_propose(self) -> None:
+        adapter = FakeAdapter()
+
+        self.assertIsInstance(adapter, ModelAdapter)
+        self.assertEqual(
+            adapter.propose("prompt"),
+            ModelResponse("test-model", '{"title":"Review me"}'),
         )
 
     def test_adapter_errors_carry_only_bounded_response_context(self) -> None:
@@ -62,6 +79,27 @@ class ModelContractTests(unittest.TestCase):
         self.assertIn("sensitivity", prompt)
         self.assertIn("confidence", prompt)
         self.assertNotIn("routing", prompt)
+
+    def test_proposal_prompt_is_immutable_version_one(self) -> None:
+        self.assertEqual(PROPOSAL_PROMPT_VERSION, "propose-v1")
+
+        prompt = load_proposal_prompt()
+
+        self.assertIn("{{CAPTURE_JSON}}", prompt)
+        self.assertIn("{{CLASSIFICATION_JSON}}", prompt)
+        self.assertIn("title", prompt)
+        self.assertIn("body", prompt)
+        self.assertIn("reason", prompt)
+        self.assertIn("uncertainties", prompt)
+        for owned_field in (
+            "proposal_id",
+            "status",
+            "risk_level",
+            "links",
+            "draft_path",
+        ):
+            with self.subTest(owned_field=owned_field):
+                self.assertNotIn(owned_field, prompt)
 
 
 if __name__ == "__main__":

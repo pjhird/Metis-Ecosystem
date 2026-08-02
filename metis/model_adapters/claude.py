@@ -1,4 +1,4 @@
-"""Thin Anthropic adapter for the bounded classification request."""
+"""Thin Anthropic adapter for bounded Metis model requests."""
 
 from __future__ import annotations
 
@@ -38,6 +38,25 @@ CLASSIFICATION_SCHEMA = {
     "required": ["candidate_type", "sensitivity", "confidence"],
     "additionalProperties": False,
 }
+PROPOSAL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "title": {"type": "string", "minLength": 1, "maxLength": 160},
+        "body": {"type": "string", "minLength": 1},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 1000},
+        "uncertainties": {
+            "type": "array",
+            "maxItems": 10,
+            "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500,
+            },
+        },
+    },
+    "required": ["title", "body", "reason", "uncertainties"],
+    "additionalProperties": False,
+}
 
 
 class ClaudeModelAdapter:
@@ -49,14 +68,41 @@ class ClaudeModelAdapter:
     ) -> None:
         self._environment = os.environ if environment is None else environment
         self._client_factory = client_factory
-        self._model_id = self._environment.get(
+        self._classification_model_id = self._environment.get(
             "METIS_CLASSIFICATION_MODEL",
+            DEFAULT_MODEL,
+        )
+        self._proposal_model_id = self._environment.get(
+            "METIS_PROPOSAL_MODEL",
             DEFAULT_MODEL,
         )
 
     def classify(self, prompt: str) -> ModelResponse:
+        return self._request(
+            prompt,
+            model_id=self._classification_model_id,
+            max_tokens=128,
+            schema=CLASSIFICATION_SCHEMA,
+        )
+
+    def propose(self, prompt: str) -> ModelResponse:
+        return self._request(
+            prompt,
+            model_id=self._proposal_model_id,
+            max_tokens=8192,
+            schema=PROPOSAL_SCHEMA,
+        )
+
+    def _request(
+        self,
+        prompt: str,
+        *,
+        model_id: str,
+        max_tokens: int,
+        schema: dict,
+    ) -> ModelResponse:
         api_key = self._environment.get("ANTHROPIC_API_KEY", "").strip()
-        if not api_key or not self._model_id.strip():
+        if not api_key or not model_id.strip():
             raise ModelConfigurationError(
                 "model_configuration_failed",
                 "Anthropic API key is not configured",
@@ -65,14 +111,14 @@ class ClaudeModelAdapter:
         try:
             client = self._client_factory(api_key=api_key)
             response = client.messages.create(
-                model=self._model_id,
-                max_tokens=128,
+                model=model_id,
+                max_tokens=max_tokens,
                 temperature=0,
                 messages=[{"role": "user", "content": prompt}],
                 output_config={
                     "format": {
                         "type": "json_schema",
-                        "schema": CLASSIFICATION_SCHEMA,
+                        "schema": schema,
                     }
                 },
             )
