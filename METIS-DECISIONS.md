@@ -433,6 +433,64 @@ record covers the development system only.
 
 ---
 
+## ADR-020 — A proposed draft has two human-editable fields: `status` and `links`
+
+**Context.** ADR-005 makes the vault the sole approval surface, and the schema doc's note-schema rules (§4.3)
+recorded a stricter reading of it: `status` is the only field a human edits. Step 4 implemented exactly that.
+The draft store validates an observed draft by rendering the three legal `status` variants of the expected
+bytes and requiring the file to match one of them exactly, so any other edit is refused as inconsistent. That
+byte-exactness is what makes the approval read trustworthy: the system knows precisely what the human saw.
+
+Two requirements then collide with it. REQ-INTK-004 requires an approved intake to link to an existing goal or
+project, and `unresolvable_link_blocks_commit` is a required negative test. But nothing proposes links —
+`propose-v1` returns only title, body, reason, and uncertainties, and `proposal.proposed_links` is always `[]`.
+The links have to come from the human, who authors goal and project notes by hand in Obsidian.
+
+They also have to arrive *before* approval, not after. The owner's workflow is: write the goal note, open the
+draft, add the link, then flip the status. Under the one-field contract the approval command refuses that
+draft outright, so the workflow the MVP acceptance criterion describes cannot be completed at all.
+
+**Decision.** A proposed draft has exactly two human-editable fields:
+
+- `status` — the approval signal, one of `proposed` · `approved` · `rejected`. Unchanged by this record.
+- `links` — a list of wikilinks to existing goal or project notes.
+
+Every other byte of the draft remains system-owned and byte-exact, and the draft store continues to refuse a
+draft that differs anywhere else. `links` supplies content; it does not authorize. Approval authority still
+rests solely on `status`, so there is still exactly one approval surface and ADR-005 is unchanged.
+
+Editing `links` does not make an approval decision, and an unresolvable link does not invalidate an approval
+that was genuinely given. It blocks the permanent write and produces a visible review item — the fail-closed
+behavior blueprint §7 requires, applied to filing rather than to approval.
+
+**Alternatives.** Keeping one editable field and having the model propose links (rejected: a link is a
+relationship assertion about the owner's own goals, and ADR-004's whole premise is that a model's assertion is
+a proposal, not a fact — this would make the model author the graph and reduce the human to ratifying it).
+A separate `metis link <capture_id> <target>` command (rejected: a second place to shape a proposal before
+approval, and it moves work out of the vault where the human is already reading — the ADR-005 objection).
+Collecting links after approval, at filing time (rejected: the human would approve a note whose relationships
+they had not yet seen, so the approval would attest to less than the thing being filed). Deferring links and
+filing orphans (rejected: REQ-INTK-004 exists precisely to prevent orphans, and deferring it defers the MVP).
+
+**Consequences.** The draft contract becomes two variable regions instead of one, and the draft store must
+report observed links alongside the observed status. The trust property survives in the same form it had
+before — everything outside the editable fields is still byte-exact — but the invariant is now "two fields"
+rather than "one", and every future reader of a draft has to honor both.
+
+The step-6 note writer gains an obligation: resolve each link against an existing note's `id` in `vault/goals/`
+or `vault/projects/`, and refuse to file on an unresolvable one. Goal and project notes are authored by hand;
+Metis does not create them, and this record does not propose that it should.
+
+`METIS-SCHEMAS.md` §4.3 is amended by this decision.
+
+**Reversal path.** Narrowing back to one editable field is a validation change plus a decision about where
+links come from instead. Nothing persisted depends on the second field.
+
+**Revisit if.** Hand-authored links prove too laborious at volume, or a future step gives the model a
+bounded, human-confirmed way to suggest links — which would be a new record, not a quiet widening of this one.
+
+---
+
 ## Decision Summary
 
 | ID | Decision | Status |
@@ -456,6 +514,7 @@ record covers the development system only.
 | ADR-017 | Secrets outside Git and vault | Adopted |
 | ADR-018 | Vector and graph databases deferred | Deferred |
 | ADR-019 | Git is the governance layer for code | Adopted |
+| ADR-020 | Draft `status` and `links` are human-editable | Adopted |
 
 Adopted means chosen and to be built. Deferred means chosen *not* to be built yet, with a stated trigger.
 Neither means implemented.
