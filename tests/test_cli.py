@@ -236,11 +236,19 @@ class ModuleEntryTests(unittest.TestCase):
 class PackagingTests(unittest.TestCase):
     def test_console_script_and_project_metadata_match_runtime_contract(self) -> None:
         with (REPOSITORY_ROOT / "pyproject.toml").open("rb") as stream:
-            project = tomllib.load(stream)["project"]
+            configuration = tomllib.load(stream)
+        project = configuration["project"]
 
         self.assertEqual(project["name"], "metis-ecosystem")
-        self.assertEqual(project["dependencies"], [])
+        self.assertEqual(project["dependencies"], ["anthropic>=0.104,<1"])
         self.assertEqual(project["scripts"]["metis"], "metis.cli:main")
+        self.assertEqual(
+            configuration["tool"]["setuptools"]["package-data"],
+            {
+                "metis.data_access": ["migrations/*.sql"],
+                "metis.prompts": ["*.txt"],
+            },
+        )
 
     def test_built_wheel_installs_migration_and_working_console_script(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -287,6 +295,14 @@ class PackagingTests(unittest.TestCase):
             with zipfile.ZipFile(wheel) as archive:
                 self.assertIn(
                     "metis/data_access/migrations/001_initial.sql",
+                    archive.namelist(),
+                )
+                self.assertIn(
+                    "metis/data_access/migrations/002_unique_classification_capture.sql",
+                    archive.namelist(),
+                )
+                self.assertIn(
+                    "metis/prompts/classify-v1.txt",
                     archive.namelist(),
                 )
 
