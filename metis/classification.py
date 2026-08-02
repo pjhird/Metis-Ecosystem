@@ -46,6 +46,32 @@ SENSITIVITIES = {"normal", "sensitive"}
 RESPONSE_KEYS = {"candidate_type", "sensitivity", "confidence"}
 
 
+def parse_classification_response(raw_text: str) -> tuple[str, str, float]:
+    def reject_duplicate_keys(
+        pairs: list[tuple[str, object]],
+    ) -> dict[str, object]:
+        payload: dict[str, object] = {}
+        for key, value in pairs:
+            if key in payload:
+                raise ValueError("model response keys are duplicated")
+            payload[key] = value
+        return payload
+
+    payload = json.loads(raw_text, object_pairs_hook=reject_duplicate_keys)
+    if type(payload) is not dict or set(payload) != RESPONSE_KEYS:
+        raise ValueError("model response keys are invalid")
+    candidate_type = payload["candidate_type"]
+    sensitivity = payload["sensitivity"]
+    confidence = payload["confidence"]
+    if not isinstance(candidate_type, str) or candidate_type not in ROUTING:
+        raise ValueError("candidate type is invalid")
+    if not isinstance(sensitivity, str) or sensitivity not in SENSITIVITIES:
+        raise ValueError("sensitivity is invalid")
+    if type(confidence) not in (int, float) or not 0 <= confidence <= 1:
+        raise ValueError("confidence is invalid")
+    return candidate_type, sensitivity, float(confidence)
+
+
 class ClassificationStatus(str, Enum):
     CLASSIFIED = "classified"
     DUPLICATE = "duplicate"
@@ -282,7 +308,9 @@ class ClassificationService:
                 "response_evidence_failed",
             )
         try:
-            candidate_type, sensitivity, confidence = self._parse_response(raw_text)
+            candidate_type, sensitivity, confidence = parse_classification_response(
+                raw_text
+            )
         except (json.JSONDecodeError, TypeError, ValueError):
             return self._failure_after_start(
                 capture_id,
@@ -354,7 +382,7 @@ class ClassificationService:
             evidence = self._response_store.validate_directory(
                 self._runtime_root / Path(record.raw_response_path).parent
             )
-            candidate_type, sensitivity, confidence = self._parse_response(
+            candidate_type, sensitivity, confidence = parse_classification_response(
                 evidence.raw_path.read_text(encoding="utf-8")
             )
         except (
@@ -482,32 +510,7 @@ class ClassificationService:
         )
 
     def _parse_response(self, raw_text: str) -> tuple[str, str, float]:
-        def reject_duplicate_keys(
-            pairs: list[tuple[str, object]],
-        ) -> dict[str, object]:
-            payload: dict[str, object] = {}
-            for key, value in pairs:
-                if key in payload:
-                    raise ValueError("model response keys are duplicated")
-                payload[key] = value
-            return payload
-
-        payload = json.loads(raw_text, object_pairs_hook=reject_duplicate_keys)
-        if type(payload) is not dict or set(payload) != RESPONSE_KEYS:
-            raise ValueError("model response keys are invalid")
-        candidate_type = payload["candidate_type"]
-        sensitivity = payload["sensitivity"]
-        confidence = payload["confidence"]
-        if not isinstance(candidate_type, str) or candidate_type not in ROUTING:
-            raise ValueError("candidate type is invalid")
-        if not isinstance(sensitivity, str) or sensitivity not in SENSITIVITIES:
-            raise ValueError("sensitivity is invalid")
-        if (
-            type(confidence) not in (int, float)
-            or not 0 <= confidence <= 1
-        ):
-            raise ValueError("confidence is invalid")
-        return candidate_type, sensitivity, float(confidence)
+        return parse_classification_response(raw_text)
 
     def _row_matches_evidence(self, intake, evidence) -> bool:
         return (
