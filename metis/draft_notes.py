@@ -160,6 +160,7 @@ class DraftNoteStore:
         try:
             path = self._validated_path(relative_path)
             self._validate_expected_bytes(expected_proposed_bytes)
+            self._validate_parents(path.parent)
             if not path.is_file() or path.is_symlink():
                 raise ValueError("draft is missing or not a regular file")
             observed = path.read_bytes()
@@ -210,6 +211,17 @@ class DraftNoteStore:
                 current.mkdir(exist_ok=True)
             except FileExistsError:
                 pass
+            if current.is_symlink() or not current.is_dir():
+                raise ValueError("draft parent is not a real directory")
+        if current != expected_parent:
+            raise ValueError("draft parent disagrees with path contract")
+
+    def _validate_parents(self, expected_parent: Path) -> None:
+        current = self._runtime_root
+        if current.is_symlink() or not current.is_dir():
+            raise ValueError("runtime root is not a real directory")
+        for part in ("vault", "notes", "proposed"):
+            current = current / part
             if current.is_symlink() or not current.is_dir():
                 raise ValueError("draft parent is not a real directory")
         if current != expected_parent:

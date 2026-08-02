@@ -71,6 +71,27 @@ class ProposalEvidenceStoreTests(unittest.TestCase):
 
         self.assertEqual(self.store.validate_directory(expected.directory), expected)
 
+    def test_create_refuses_symlinked_store_root(self) -> None:
+        outside = self.runtime_root / "outside"
+        outside.mkdir()
+        evidence_root = self.runtime_root / "proposal-evidence"
+        evidence_root.symlink_to(outside, target_is_directory=True)
+
+        with self.assertRaises(ProposalEvidenceWriteError):
+            self._create()
+
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_validate_refuses_store_root_replaced_by_symlink(self) -> None:
+        self._create()
+        evidence_root = self.runtime_root / "proposal-evidence"
+        relocated = self.runtime_root / "relocated-evidence"
+        evidence_root.rename(relocated)
+        evidence_root.symlink_to(relocated, target_is_directory=True)
+
+        with self.assertRaises(ProposalEvidenceConsistencyError):
+            self.store.validate_directory(evidence_root / PROPOSAL_ID)
+
     def test_existing_directory_is_never_overwritten(self) -> None:
         record = self._create()
         before = {path.name: path.read_bytes() for path in record.directory.iterdir()}

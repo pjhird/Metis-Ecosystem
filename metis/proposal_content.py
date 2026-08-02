@@ -57,7 +57,8 @@ class ProposalContentWriteError(ProposalContentError):
 
 class ProposalContentStore:
     def __init__(self, runtime_root: Path) -> None:
-        self._content_root = Path(runtime_root) / "proposal-content"
+        self._runtime_root = Path(runtime_root)
+        self._content_root = self._runtime_root / "proposal-content"
 
     def create(
         self,
@@ -98,14 +99,14 @@ class ProposalContentStore:
             "schema_version": 1,
         }
         try:
-            self._content_root.mkdir(parents=True, exist_ok=True)
+            self._prepare_root()
             directory.mkdir(exist_ok=False)
         except FileExistsError as error:
             raise ProposalContentCollision(
                 f"proposal content target already exists: {directory}",
                 content_path,
             ) from error
-        except OSError as error:
+        except (OSError, ValueError) as error:
             raise ProposalContentWriteError(
                 f"proposal content directory creation failed: {error}",
                 content_path,
@@ -127,6 +128,7 @@ class ProposalContentStore:
         directory = Path(directory)
         content_path = f"proposal-content/{directory.name}/body.md"
         try:
+            self._validate_directory(directory)
             if not directory.is_dir() or directory.is_symlink():
                 raise ValueError("proposal content target is not a directory")
             if not is_ulid(directory.name):
@@ -163,6 +165,28 @@ class ProposalContentStore:
                 content_path,
             ) from error
         return self._record(metadata, directory)
+
+    def _prepare_root(self) -> None:
+        if self._runtime_root.is_symlink() or (
+            self._runtime_root.exists() and not self._runtime_root.is_dir()
+        ):
+            raise ValueError("runtime root is not a real directory")
+        self._runtime_root.mkdir(parents=True, exist_ok=True)
+        if self._content_root.is_symlink() or (
+            self._content_root.exists() and not self._content_root.is_dir()
+        ):
+            raise ValueError("proposal content root is not a real directory")
+        self._content_root.mkdir(exist_ok=True)
+        if self._content_root.is_symlink() or not self._content_root.is_dir():
+            raise ValueError("proposal content root is not a real directory")
+
+    def _validate_directory(self, directory: Path) -> None:
+        if self._runtime_root.is_symlink() or not self._runtime_root.is_dir():
+            raise ValueError("runtime root is not a real directory")
+        if self._content_root.is_symlink() or not self._content_root.is_dir():
+            raise ValueError("proposal content root is not a real directory")
+        if directory.parent != self._content_root:
+            raise ValueError("proposal content target is outside the store root")
 
     def _validate_metadata(self, metadata: dict, proposal_id: str) -> None:
         if metadata["proposal_id"] != proposal_id:

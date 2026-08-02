@@ -169,6 +169,16 @@ class DraftNoteTests(unittest.TestCase):
         with self.assertRaises(DraftNoteConsistencyError):
             self.store.validate(DRAFT_PATH, self.expected)
 
+    def test_validate_refuses_parent_replaced_by_symlink(self) -> None:
+        self.store.create(DRAFT_PATH, self.expected)
+        proposed = self.runtime_root / "vault" / "notes" / "proposed"
+        relocated = self.runtime_root / "relocated-proposed"
+        proposed.rename(relocated)
+        proposed.symlink_to(relocated, target_is_directory=True)
+
+        with self.assertRaises(DraftNoteConsistencyError):
+            self.store.validate(DRAFT_PATH, self.expected)
+
     def test_collision_never_overwrites_existing_bytes(self) -> None:
         record = self.store.create(DRAFT_PATH, self.expected)
 

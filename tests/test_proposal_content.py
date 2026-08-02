@@ -66,6 +66,27 @@ class ProposalContentStoreTests(unittest.TestCase):
 
         self.assertEqual(self.store.validate_directory(expected.directory), expected)
 
+    def test_create_refuses_symlinked_store_root(self) -> None:
+        outside = self.runtime_root / "outside"
+        outside.mkdir()
+        content_root = self.runtime_root / "proposal-content"
+        content_root.symlink_to(outside, target_is_directory=True)
+
+        with self.assertRaises(ProposalContentWriteError):
+            self._create()
+
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_validate_refuses_store_root_replaced_by_symlink(self) -> None:
+        self._create()
+        content_root = self.runtime_root / "proposal-content"
+        relocated = self.runtime_root / "relocated-content"
+        content_root.rename(relocated)
+        content_root.symlink_to(relocated, target_is_directory=True)
+
+        with self.assertRaises(ProposalContentConsistencyError):
+            self.store.validate_directory(content_root / PROPOSAL_ID)
+
     def test_existing_directory_is_never_overwritten(self) -> None:
         record = self._create()
         before = {path.name: path.read_bytes() for path in record.directory.iterdir()}

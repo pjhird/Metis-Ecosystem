@@ -60,7 +60,8 @@ class ProposalEvidenceWriteError(ProposalEvidenceError):
 
 class ProposalEvidenceStore:
     def __init__(self, runtime_root: Path) -> None:
-        self._evidence_root = Path(runtime_root) / "proposal-evidence"
+        self._runtime_root = Path(runtime_root)
+        self._evidence_root = self._runtime_root / "proposal-evidence"
 
     def create(
         self,
@@ -103,14 +104,14 @@ class ProposalEvidenceStore:
             "schema_version": 1,
         }
         try:
-            self._evidence_root.mkdir(parents=True, exist_ok=True)
+            self._prepare_root()
             directory.mkdir(exist_ok=False)
         except FileExistsError as error:
             raise ProposalEvidenceCollision(
                 f"proposal evidence target already exists: {directory}",
                 evidence_path,
             ) from error
-        except OSError as error:
+        except (OSError, ValueError) as error:
             raise ProposalEvidenceWriteError(
                 f"proposal evidence directory creation failed: {error}",
                 evidence_path,
@@ -134,6 +135,7 @@ class ProposalEvidenceStore:
         directory = Path(directory)
         evidence_path = f"proposal-evidence/{directory.name}"
         try:
+            self._validate_directory(directory)
             if not directory.is_dir() or directory.is_symlink():
                 raise ValueError("proposal evidence target is not a directory")
             if not is_ulid(directory.name):
@@ -169,6 +171,28 @@ class ProposalEvidenceStore:
             ) from error
 
         return self._record(metadata, raw_bytes, directory)
+
+    def _prepare_root(self) -> None:
+        if self._runtime_root.is_symlink() or (
+            self._runtime_root.exists() and not self._runtime_root.is_dir()
+        ):
+            raise ValueError("runtime root is not a real directory")
+        self._runtime_root.mkdir(parents=True, exist_ok=True)
+        if self._evidence_root.is_symlink() or (
+            self._evidence_root.exists() and not self._evidence_root.is_dir()
+        ):
+            raise ValueError("proposal evidence root is not a real directory")
+        self._evidence_root.mkdir(exist_ok=True)
+        if self._evidence_root.is_symlink() or not self._evidence_root.is_dir():
+            raise ValueError("proposal evidence root is not a real directory")
+
+    def _validate_directory(self, directory: Path) -> None:
+        if self._runtime_root.is_symlink() or not self._runtime_root.is_dir():
+            raise ValueError("runtime root is not a real directory")
+        if self._evidence_root.is_symlink() or not self._evidence_root.is_dir():
+            raise ValueError("proposal evidence root is not a real directory")
+        if directory.parent != self._evidence_root:
+            raise ValueError("proposal evidence target is outside the store root")
 
     def _validate_metadata(self, metadata: dict, proposal_id: str) -> None:
         if metadata["proposal_id"] != proposal_id:
