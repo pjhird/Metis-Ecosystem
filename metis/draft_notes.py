@@ -5,10 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 from uuid import UUID
 
 from .data_access import ProposalRecord
@@ -20,11 +21,19 @@ class DraftStatus(str, Enum):
     REJECTED = "rejected"
 
 
+EMPTY_LINKS = b"links: []\n"
+LINKS_HEADER = b"links:\n"
+LINK_PREFIX = b'  - "[['
+LINK_SUFFIX = b']]"\n'
+LINK_TARGET = re.compile(r"[A-Za-z0-9._-]+")
+
+
 @dataclass(frozen=True)
 class DraftNoteRecord:
     draft_path: str
     content_hash: str
     observed_status: DraftStatus
+    observed_links: Tuple[str, ...]
     path: Path
 
 
@@ -149,6 +158,7 @@ class DraftNoteStore:
             relative_path,
             observed,
             DraftStatus.PROPOSED,
+            (),
             path,
         )
 
@@ -165,23 +175,74 @@ class DraftNoteStore:
                 raise ValueError("draft is missing or not a regular file")
             observed = path.read_bytes()
             observed.decode("utf-8")
-            variants = {
-                status: expected_proposed_bytes.replace(
-                    b"status: proposed\n",
-                    f"status: {status.value}\n".encode("utf-8"),
-                    1,
-                )
-                for status in DraftStatus
-            }
-            matches = [status for status, value in variants.items() if observed == value]
-            if len(matches) != 1:
-                raise ValueError("draft differs outside the editable status field")
+            status, links = self._match_editable_fields(
+                observed,
+                expected_proposed_bytes,
+            )
         except (OSError, TypeError, UnicodeError, ValueError) as error:
             raise DraftNoteConsistencyError(
                 f"draft is inconsistent: {error}",
                 relative_path if isinstance(relative_path, str) else None,
             ) from error
-        return self._record(relative_path, observed, matches[0], path)
+        return self._record(relative_path, observed, status, links, path)
+
+    def _match_editable_fields(
+        self,
+        observed: bytes,
+        expected: bytes,
+    ) -> Tuple[DraftStatus, Tuple[str, ...]]:
+        """Match every byte outside `status` and `links` exactly (ADR-020)."""
+        head, tail = self._split_editable(expected)
+        boundary = observed.find(b"---\n\n", len(b"---\n"))
+        if not observed.startswith(b"---\n") or boundary == -1:
+            raise ValueError("draft frontmatter is missing")
+        if observed[boundary:] != tail:
+            raise ValueError("draft differs outside the editable fields")
+        frontmatter = observed[len(b"---\n") : boundary]
+        matches = [
+            (status, variant)
+            for status, variant in (
+                (status, self._status_variant(head, status))
+                for status in DraftStatus
+            )
+            if frontmatter.startswith(variant)
+        ]
+        if len(matches) != 1:
+            raise ValueError("draft differs outside the editable fields")
+        status, variant = matches[0]
+        return status, self._parsed_links(frontmatter[len(variant) :])
+
+    def _split_editable(self, expected: bytes) -> Tuple[bytes, bytes]:
+        boundary = expected.find(b"---\n\n", len(b"---\n"))
+        frontmatter = expected[len(b"---\n") : boundary]
+        return frontmatter[: -len(EMPTY_LINKS)], expected[boundary:]
+
+    def _status_variant(self, head: bytes, status: DraftStatus) -> bytes:
+        return head.replace(
+            b"status: proposed\n",
+            f"status: {status.value}\n".encode("utf-8"),
+            1,
+        )
+
+    def _parsed_links(self, region: bytes) -> Tuple[str, ...]:
+        if region == EMPTY_LINKS:
+            return ()
+        if not region.startswith(LINKS_HEADER):
+            raise ValueError("draft links field is malformed")
+        lines = region[len(LINKS_HEADER) :].splitlines(keepends=True)
+        if not lines:
+            raise ValueError("draft links field is empty")
+        targets = []
+        for line in lines:
+            if not line.startswith(LINK_PREFIX) or not line.endswith(LINK_SUFFIX):
+                raise ValueError("draft link entry is malformed")
+            target = line[len(LINK_PREFIX) : -len(LINK_SUFFIX)].decode("utf-8")
+            if LINK_TARGET.fullmatch(target) is None:
+                raise ValueError("draft link target is invalid")
+            targets.append(target)
+        if len(set(targets)) != len(targets):
+            raise ValueError("draft links contain a duplicate")
+        return tuple(targets)
 
     def _validated_path(self, relative_path: str) -> Path:
         if not isinstance(relative_path, str):
@@ -239,17 +300,21 @@ class DraftNoteStore:
         frontmatter = expected_bytes[len(b"---\n") : frontmatter_end]
         if frontmatter.splitlines(keepends=True).count(b"status: proposed\n") != 1:
             raise ValueError("expected draft status field is invalid")
+        if not frontmatter.endswith(EMPTY_LINKS):
+            raise ValueError("expected draft links field is invalid")
 
     def _record(
         self,
         relative_path: str,
         observed: bytes,
         status: DraftStatus,
+        links: Tuple[str, ...],
         path: Path,
     ) -> DraftNoteRecord:
         return DraftNoteRecord(
             draft_path=relative_path,
             content_hash=hashlib.sha256(observed).hexdigest(),
             observed_status=status,
+            observed_links=links,
             path=path,
         )

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 from .contracts import (
+    ApprovalRecord,
     ClassificationRecord,
     IntakeRecord,
     IntakeRegistrationResult,
@@ -68,6 +69,17 @@ PROPOSAL_COLUMNS = (
     "state",
     "created_at",
 )
+APPROVAL_COLUMNS = (
+    "approval_id",
+    "proposal_id",
+    "decision",
+    "approver",
+    "observed_status",
+    "detected_at",
+    "committed_at",
+    "revoked_at",
+)
+APPROVAL_DECISIONS = frozenset({"approved", "rejected"})
 PROPOSAL_RESERVATION_COLUMNS = (
     "proposal_id",
     "capture_id",
@@ -996,6 +1008,113 @@ class SQLiteStateStore:
             raise StateStoreError(
                 f"proposal draft registration failed: {error}"
             ) from error
+
+    def find_intakes_awaiting_approval(self) -> Tuple[IntakeRecord, ...]:
+        """Return every intake whose draft is waiting for a human decision."""
+        try:
+            rows = self._connect().execute(
+                "SELECT capture_id, content_hash, captured_at, source_type, "
+                "evidence_path, state, state_updated_at, failure_reason, trace_id "
+                "FROM intake WHERE state = 'awaiting_approval' "
+                "ORDER BY state_updated_at, capture_id"
+            ).fetchall()
+        except sqlite3.Error as error:
+            raise StateStoreError(f"approval queue lookup failed: {error}") from error
+        return tuple(_intake_record(row) for row in rows)
+
+    def record_approval(self, record: ApprovalRecord) -> IntakeRecord:
+        """Record one human decision and transition its intake atomically."""
+        if (
+            record.decision not in APPROVAL_DECISIONS
+            or record.observed_status != record.decision
+            or not record.approver.startswith("human:")
+            or record.committed_at is not None
+            or record.revoked_at is not None
+        ):
+            raise StateStoreError("approval record is inconsistent")
+        connection = self._proposal_connection("approval recording")
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            proposal_row = connection.execute(
+                "SELECT capture_id, draft_note_path, state FROM proposal "
+                "WHERE proposal_id = ?",
+                (record.proposal_id,),
+            ).fetchone()
+            if proposal_row is None:
+                connection.rollback()
+                raise StateStoreError(
+                    f"approval recording failed: proposal not found: "
+                    f"{record.proposal_id}"
+                )
+            capture_id, draft_note_path, proposal_state = proposal_row
+            current = self._required_intake(connection, capture_id)
+            approved_already = connection.execute(
+                "SELECT COUNT(*) FROM approval WHERE proposal_id = ?",
+                (record.proposal_id,),
+            ).fetchone()
+            if (
+                current.state != "awaiting_approval"
+                or current.failure_reason is not None
+                or proposal_state != "pending"
+                or draft_note_path is None
+                or approved_already != (0,)
+                or not _timestamp_not_before(
+                    record.detected_at,
+                    current.state_updated_at,
+                )
+            ):
+                connection.rollback()
+                raise StateTransitionRefused(
+                    "approval requires a pending proposal awaiting a decision",
+                    current,
+                )
+            connection.execute(
+                "INSERT INTO approval (approval_id, proposal_id, decision, approver, "
+                "observed_status, detected_at, committed_at, revoked_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                tuple(getattr(record, column) for column in APPROVAL_COLUMNS),
+            )
+            cursor = connection.execute(
+                "UPDATE proposal SET state = ? WHERE proposal_id = ? "
+                "AND capture_id = ? AND state = 'pending'",
+                (record.decision, record.proposal_id, capture_id),
+            )
+            if cursor.rowcount != 1:
+                connection.rollback()
+                raise StateTransitionRefused(
+                    "approval lost its proposal comparison",
+                    current,
+                )
+            cursor = connection.execute(
+                "UPDATE intake SET state = ?, state_updated_at = ?, "
+                "failure_reason = NULL WHERE capture_id = ? "
+                "AND state = 'awaiting_approval' AND failure_reason IS NULL "
+                "AND state_updated_at = ?",
+                (
+                    record.decision,
+                    record.detected_at,
+                    capture_id,
+                    current.state_updated_at,
+                ),
+            )
+            if cursor.rowcount != 1:
+                connection.rollback()
+                raise StateTransitionRefused(
+                    "approval lost its state comparison",
+                    current,
+                )
+            updated = self._required_intake(connection, capture_id)
+            connection.commit()
+            return updated
+        except (StateStoreError, StateTransitionRefused):
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        except sqlite3.Error as error:
+            if connection.in_transaction:
+                connection.rollback()
+            raise StateStoreError(f"approval recording failed: {error}") from error
+
     def _proposal_connection(self, operation: str) -> sqlite3.Connection:
         try:
             return self._connect()

@@ -6,9 +6,10 @@
 > The first five operational-state tables are implemented by
 > `metis/data_access/migrations/001_initial.sql`; migration `002_unique_classification_capture.sql` enforces one
 > classification per capture; migration `003_proposal_reservation.sql` adds reservation-first proposal state,
-> the expanded proposal contract, and replay uniqueness. Source, classification-response, proposal-response,
-> canonical proposal-content, and proposed-draft storage are implemented. Approval, permanent filing, linking,
-> and audit behavior remain unimplemented.
+> the expanded proposal contract, and replay uniqueness; migration `004_unique_approval_proposal.sql` enforces
+> one approval per proposal. Source, classification-response, proposal-response, canonical proposal-content,
+> and proposed-draft storage are implemented, as is approval detection and recording. Permanent filing,
+> linking, and audit behavior remain unimplemented.
 
 ## Scope
 
@@ -172,8 +173,8 @@ a fact, and Step 3 grants it no write authority over durable knowledge.
 | `created_at` | TEXT | |
 
 Partially implements REQ-GOV-003. A proposal writes nothing permanent — the draft note in the vault is
-explicitly marked `status: proposed` and is not durable knowledge. Approver and decision fields remain owned by
-Step 5.
+explicitly marked `status: proposed` and is not durable knowledge. Approver and decision live in `approval`
+(§2.5) and are recorded by Step 5; `state` moves to `approved` or `rejected` in the same transaction.
 
 ### 2.4 `proposal_reservation`
 
@@ -205,7 +206,9 @@ with the same proposal ID and a new token. A stale token cannot complete or reco
 | `revoked_at` | TEXT NULL | set if withdrawn before commit |
 
 `observed_status` records what the vault actually said, so a disputed approval can be reconstructed rather
-than inferred.
+than inferred. Migration 004 makes `proposal_id` unique: a second decision for one proposal fails at the data
+layer. `committed_at` is set by permanent filing (Step 6) and is `NULL` while only a decision exists.
+`revoked_at` is unused until revocation is designed (open question 2).
 
 ### 2.6 `audit_event`
 
@@ -313,8 +316,13 @@ links:
 
 Rules:
 
-- `status` is the **only** field a human edits to authorize a change (ADR-005). Everything else is written by
-  the system.
+- A draft has exactly **two** human-editable fields, `status` and `links` (ADR-020). Everything else is
+  written by the system and is byte-exact; the draft store refuses a draft that differs anywhere else.
+- `status` is the only field that **authorizes** a change (ADR-005). `links` supplies content and authorizes
+  nothing, so there is still exactly one approval surface.
+- `links` is either `links: []` or `links:` followed by one or more `  - "[[target]]"` lines. Targets are
+  restricted to `[A-Za-z0-9._-]+`, must be unique, and are typed by the human — Metis does not create goal or
+  project notes and never proposes a link.
 - `capture_id` and `evidence` are mandatory — a note without provenance is invalid (REQ-VLT-004).
 - `verification` is separate from `status`. Approving that a note should exist is not the same as verifying
   its content is true (REQ-DATA-005).

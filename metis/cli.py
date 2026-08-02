@@ -9,6 +9,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
+from .approval import ApprovalRunResult, ApprovalRunStatus, ApprovalService
 from .capture import CaptureResult, CaptureService, CaptureStatus
 from .classification import (
     ClassificationResult,
@@ -38,6 +39,7 @@ def main(
     classify_parser.add_argument("capture_id")
     propose_parser = subparsers.add_parser("propose")
     propose_parser.add_argument("capture_id")
+    subparsers.add_parser("approvals")
     arguments = parser.parse_args(argv)
 
     root = Path.cwd() if runtime_root is None else Path(runtime_root)
@@ -64,6 +66,13 @@ def main(
                     model_adapter,
                     root,
                 ).classify(arguments.capture_id)
+            elif arguments.command == "approvals":
+                result = ApprovalService(
+                    state_store,
+                    ProposalContentStore(root),
+                    DraftNoteStore(root),
+                    root,
+                ).review()
             else:
                 if model_adapter_factory is None:
                     from .model_adapters.claude import ClaudeModelAdapter
@@ -105,6 +114,13 @@ def main(
                 "state_initialization_failed",
                 "state initialization failed",
             )
+        elif arguments.command == "approvals":
+            result = ApprovalRunResult(
+                status=ApprovalRunStatus.FAILED,
+                decisions=(),
+                reason="state_initialization_failed",
+                message="state initialization failed",
+            )
         else:
             result = ProposalResult(
                 status=ProposalStatus.FAILED,
@@ -126,6 +142,9 @@ def main(
 
     payload = asdict(result)
     payload["status"] = result.status.value
+    if isinstance(result, ApprovalRunResult):
+        for entry, decision in zip(payload["decisions"], result.decisions):
+            entry["status"] = decision.status.value
     output = sys.stderr if result.status.value == "failed" else sys.stdout
     print(json.dumps(payload, sort_keys=True), file=output)
     return 1 if result.status.value == "failed" else 0

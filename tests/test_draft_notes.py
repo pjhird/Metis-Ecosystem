@@ -99,7 +99,116 @@ class DraftNoteTests(unittest.TestCase):
         self.assertEqual(record.path.read_bytes(), self.expected)
         self.assertEqual(record.content_hash, hashlib.sha256(self.expected).hexdigest())
         self.assertEqual(record.observed_status, DraftStatus.PROPOSED)
+        self.assertEqual(record.observed_links, ())
         self.assertEqual(self.store.validate(DRAFT_PATH, self.expected), record)
+
+    def test_human_added_links_are_accepted_alongside_the_status_edit(self) -> None:
+        cases = (
+            (b'links:\n  - "[[goal.health-baseline]]"\n', ("goal.health-baseline",)),
+            (
+                b'links:\n  - "[[goal.health-baseline]]"\n  - "[[proj.metis-core]]"\n',
+                ("goal.health-baseline", "proj.metis-core"),
+            ),
+            (b"links: []\n", ()),
+        )
+        for index, (block, expected_links) in enumerate(cases):
+            with self.subTest(block=block):
+                root = self.runtime_root / f"linked-{index}"
+                store = DraftNoteStore(root)
+                record = store.create(DRAFT_PATH, self.expected)
+                record.path.write_bytes(
+                    self.expected.replace(b"links: []\n", block, 1).replace(
+                        b"status: proposed\n",
+                        b"status: approved\n",
+                        1,
+                    )
+                )
+
+                observed = store.validate(DRAFT_PATH, self.expected)
+
+                self.assertEqual(observed.observed_status, DraftStatus.APPROVED)
+                self.assertEqual(observed.observed_links, expected_links)
+
+    def test_links_are_editable_without_a_status_change(self) -> None:
+        record = self.store.create(DRAFT_PATH, self.expected)
+        record.path.write_bytes(
+            self.expected.replace(
+                b"links: []\n",
+                b'links:\n  - "[[proj.metis-core]]"\n',
+                1,
+            )
+        )
+
+        observed = self.store.validate(DRAFT_PATH, self.expected)
+
+        self.assertEqual(observed.observed_status, DraftStatus.PROPOSED)
+        self.assertEqual(observed.observed_links, ("proj.metis-core",))
+
+    def test_links_like_body_lines_are_not_frontmatter_fields(self) -> None:
+        body = (
+            b'links: []\n\n## Proposal rationale\nlinks:\n  - "[[goal.spoofed]]"\n\n'
+            b"## Uncertainties\nNone identified by the proposal model.\n"
+        )
+        store = DraftNoteStore(self.runtime_root / "body-links")
+        expected = render_proposed_draft(
+            proposal_record(content_hash=hashlib.sha256(body).hexdigest()),
+            body,
+        )
+        created = store.create(DRAFT_PATH, expected)
+
+        observed = store.validate(DRAFT_PATH, expected)
+
+        self.assertEqual(observed, created)
+        self.assertEqual(observed.observed_links, ())
+
+    def test_malformed_links_block_fails_closed(self) -> None:
+        blocks = (
+            b"links:\n",
+            b'links:\n- "[[goal.health-baseline]]"\n',
+            b'links:\n    - "[[goal.health-baseline]]"\n',
+            b"links:\n  - [[goal.health-baseline]]\n",
+            b'links:\n  - "goal.health-baseline"\n',
+            b'links:\n  - "[[]]"\n',
+            b'links:\n  - "[[goal one]]"\n',
+            b'links:\n  - "[[../../etc/passwd]]"\n',
+            b'links:\n  - "[[goal.a]]"\n  - "[[goal.a]]"\n',
+            b'links:\n  - "[[goal.a]]"\nrogue: value\n',
+            b'links: ["[[goal.a]]"]\n',
+            b"links: [ ]\n",
+        )
+        for index, block in enumerate(blocks):
+            with self.subTest(block=block):
+                root = self.runtime_root / f"malformed-{index}"
+                store = DraftNoteStore(root)
+                record = store.create(DRAFT_PATH, self.expected)
+                record.path.write_bytes(
+                    self.expected.replace(b"links: []\n", block, 1)
+                )
+
+                with self.assertRaises(DraftNoteConsistencyError):
+                    store.validate(DRAFT_PATH, self.expected)
+
+    def test_edits_outside_status_and_links_are_still_refused_when_linked(self) -> None:
+        linked = self.expected.replace(
+            b"links: []\n",
+            b'links:\n  - "[[goal.health-baseline]]"\n',
+            1,
+        )
+        changes = (
+            (b"title: ", b"title: changed "),
+            (b"verification: unverified", b"verification: verified"),
+            (b"approved: null", b'approved: "2026-08-02T21:00:00Z"'),
+            (b"A reviewable proposal.", b"Edited proposal."),
+        )
+        for index, (old, new) in enumerate(changes):
+            with self.subTest(old=old):
+                root = self.runtime_root / f"linked-edit-{index}"
+                store = DraftNoteStore(root)
+                record = store.create(DRAFT_PATH, self.expected)
+                record.path.write_bytes(linked.replace(old, new, 1))
+
+                with self.assertRaises(DraftNoteConsistencyError):
+                    store.validate(DRAFT_PATH, self.expected)
 
     def test_status_like_body_and_reason_lines_are_not_frontmatter_fields(self) -> None:
         bodies = {
