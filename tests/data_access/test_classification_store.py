@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 from metis.data_access import (
@@ -202,7 +203,7 @@ class ClassificationStoreTests(unittest.TestCase):
         self.assertEqual(self.store.find_intake_by_capture_id(CAPTURE_ID), original)
 
     def test_sqlite_lookup_errors_are_wrapped(self) -> None:
-        with sqlite3.connect(self.database_path) as connection:
+        with closing(sqlite3.connect(self.database_path)) as connection:
             connection.execute("DROP TABLE classification")
 
         with self.assertRaises(StateStoreError):
@@ -219,7 +220,7 @@ class ClassificationStoreTests(unittest.TestCase):
     def test_sqlite_completion_errors_roll_back(self) -> None:
         self._register()
         self.store.begin_classification(CAPTURE_ID, STARTED_AT)
-        with sqlite3.connect(self.database_path) as connection:
+        with closing(sqlite3.connect(self.database_path)) as connection:
             connection.execute("DROP TABLE classification")
 
         with self.assertRaises(StateStoreError):

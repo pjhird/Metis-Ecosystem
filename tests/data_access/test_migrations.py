@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 from metis.data_access import (
@@ -383,7 +384,7 @@ class MigrationTests(unittest.TestCase):
 
     def test_classification_capture_is_unique(self) -> None:
         self._initialize()
-        with sqlite3.connect(self.database_path) as connection:
+        with closing(sqlite3.connect(self.database_path)) as connection:
             self._insert_valid_intake(connection)
             self._insert_valid_classification(connection)
             with self.assertRaises(sqlite3.IntegrityError):
