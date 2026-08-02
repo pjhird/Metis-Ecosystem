@@ -8,9 +8,31 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
 
+from .contracts import (
+    IntakeRecord,
+    IntakeRegistrationResult,
+    IntakeRegistrationStatus,
+    StateStoreError,
+)
+
 
 DEFAULT_MIGRATIONS_DIRECTORY = Path(__file__).with_name("migrations")
 MIGRATION_NAME = re.compile(r"^(?P<version>[0-9]{3})_[a-z0-9_]+\.sql$")
+INTAKE_COLUMNS = (
+    "capture_id",
+    "content_hash",
+    "captured_at",
+    "source_type",
+    "evidence_path",
+    "state",
+    "state_updated_at",
+    "failure_reason",
+    "trace_id",
+)
+
+
+def _intake_record(row: tuple) -> IntakeRecord:
+    return IntakeRecord(*row)
 
 
 class MigrationError(RuntimeError):
@@ -68,6 +90,54 @@ class SQLiteStateStore:
                 continue
             self._apply(migration)
             current_version = migration.version
+
+    def find_intake_by_content_hash(
+        self,
+        content_hash: str,
+    ) -> Optional[IntakeRecord]:
+        """Return the intake row registered for a content hash, if one exists."""
+        try:
+            row = self._connect().execute(
+                "SELECT capture_id, content_hash, captured_at, source_type, "
+                "evidence_path, state, state_updated_at, failure_reason, trace_id "
+                "FROM intake WHERE content_hash = ?",
+                (content_hash,),
+            ).fetchone()
+        except sqlite3.Error as error:
+            raise StateStoreError(f"intake lookup failed: {error}") from error
+        return None if row is None else _intake_record(row)
+
+    def register_intake(self, record: IntakeRecord) -> IntakeRegistrationResult:
+        """Register a captured intake row or return the exact existing duplicate."""
+        connection: Optional[sqlite3.Connection] = None
+        try:
+            connection = self._connect()
+            connection.execute(
+                "INSERT INTO intake ("
+                "capture_id, content_hash, captured_at, source_type, evidence_path, "
+                "state, state_updated_at, failure_reason, trace_id"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                tuple(getattr(record, column) for column in INTAKE_COLUMNS),
+            )
+            connection.commit()
+            return IntakeRegistrationResult(
+                IntakeRegistrationStatus.REGISTERED,
+                record,
+            )
+        except sqlite3.IntegrityError as error:
+            if connection is not None:
+                connection.rollback()
+            existing = self.find_intake_by_content_hash(record.content_hash)
+            if existing is not None:
+                return IntakeRegistrationResult(
+                    IntakeRegistrationStatus.DUPLICATE,
+                    existing,
+            )
+            raise StateStoreError(f"intake registration failed: {error}") from error
+        except sqlite3.Error as error:
+            if connection is not None:
+                connection.rollback()
+            raise StateStoreError(f"intake registration failed: {error}") from error
 
     def _migrations(self) -> Tuple[Migration, ...]:
         if not self._migrations_directory.is_dir():

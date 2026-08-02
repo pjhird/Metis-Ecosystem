@@ -5,7 +5,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from metis.data_access import MigrationError, SQLiteStateStore, StateStore
+from metis.data_access import (
+    IntakeRecord,
+    IntakeRegistrationResult,
+    IntakeRegistrationStatus,
+    MigrationError,
+    SQLiteStateStore,
+    StateStore,
+)
 
 
 EXPECTED_COLUMNS = {
@@ -95,6 +102,12 @@ class FakeStateStore:
 
     def close(self) -> None:
         return None
+
+    def find_intake_by_content_hash(self, content_hash: str) -> IntakeRecord | None:
+        return None
+
+    def register_intake(self, record: IntakeRecord) -> IntakeRegistrationResult:
+        return IntakeRegistrationResult(IntakeRegistrationStatus.REGISTERED, record)
 
 
 class MigrationTests(unittest.TestCase):
