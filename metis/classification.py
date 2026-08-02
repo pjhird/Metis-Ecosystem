@@ -12,6 +12,7 @@ from typing import Callable, Optional
 from uuid import UUID
 
 from .classification_evidence import (
+    ClassificationEvidenceError,
     ClassificationEvidenceConsistencyError,
     ClassificationEvidenceStore,
 )
@@ -23,7 +24,15 @@ from .data_access import (
 )
 from .evidence import EvidenceConsistencyError, EvidenceStore
 from .identifiers import is_ulid, new_ulid
-from .model_adapters import ModelAdapter
+from .model_adapters import (
+    ModelAdapter,
+    ModelAdapterError,
+    ModelConfigurationError,
+    ModelRequestError,
+    ModelResponseRefused,
+    ModelResponseTruncated,
+    UnsupportedModelResponse,
+)
 from .prompts import PROMPT_VERSION, load_classification_prompt
 
 
@@ -107,6 +116,8 @@ class ClassificationService:
                 message="classification state could not be determined",
             )
         if intake is None:
+            if existing is not None:
+                return self._consistency_failure(capture_id)
             return self._result(
                 ClassificationStatus.REFUSED,
                 capture_id,
@@ -200,21 +211,91 @@ class ClassificationService:
             "{{CAPTURE_JSON}}",
             json.dumps(captured_text, ensure_ascii=False),
         )
-        model_response = self._model_adapter.classify(prompt)
-        response_evidence = self._response_store.create(
+        try:
+            model_response = self._model_adapter.classify(prompt)
+        except ModelConfigurationError as error:
+            return self._failure_from_model_error(
+                capture_id,
+                classification_id,
+                error,
+                "model_configuration_failed",
+                received_at,
+            )
+        except ModelRequestError as error:
+            return self._failure_from_model_error(
+                capture_id,
+                classification_id,
+                error,
+                "model_request_failed",
+                received_at,
+            )
+        except (ModelResponseRefused, ModelResponseTruncated) as error:
+            reason = (
+                "model_response_refused"
+                if isinstance(error, ModelResponseRefused)
+                else "model_response_truncated"
+            )
+            return self._failure_from_model_error(
+                capture_id,
+                classification_id,
+                error,
+                reason,
+                received_at,
+            )
+        except UnsupportedModelResponse as error:
+            return self._failure_from_model_error(
+                capture_id,
+                classification_id,
+                error,
+                "model_response_invalid",
+                received_at,
+            )
+        except ModelAdapterError as error:
+            return self._failure_from_model_error(
+                capture_id,
+                classification_id,
+                error,
+                "model_request_failed",
+                received_at,
+            )
+
+        try:
+            raw_text = model_response.raw_text
+            model_id = model_response.model_id
+        except AttributeError:
+            return self._failure_after_start(
+                capture_id,
+                classification_id,
+                "model_response_invalid",
+            )
+        if not isinstance(raw_text, str) or not isinstance(model_id, str):
+            return self._failure_after_start(
+                capture_id,
+                classification_id,
+                "model_response_invalid",
+            )
+        raw_response_path = self._preserve_response(
             classification_id,
             capture_id,
-            model_response.raw_text,
-            model_response.model_id,
-            PROMPT_VERSION,
+            raw_text,
+            model_id,
             received_at,
         )
-        response_evidence = self._response_store.validate_directory(
-            response_evidence.directory
-        )
-        candidate_type, sensitivity, confidence = self._parse_response(
-            model_response.raw_text
-        )
+        if raw_response_path is None:
+            return self._failure_after_start(
+                capture_id,
+                classification_id,
+                "response_evidence_failed",
+            )
+        try:
+            candidate_type, sensitivity, confidence = self._parse_response(raw_text)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return self._failure_after_start(
+                capture_id,
+                classification_id,
+                "model_response_invalid",
+                raw_response_path=raw_response_path,
+            )
         routing = ROUTING[candidate_type]
         record = ClassificationRecord(
             classification_id=classification_id,
@@ -223,14 +304,20 @@ class ClassificationService:
             sensitivity=sensitivity,
             confidence=confidence,
             routing=routing,
-            model_id=model_response.model_id,
+            model_id=model_id,
             prompt_version=PROMPT_VERSION,
-            raw_response_path=str(
-                Path(response_evidence.evidence_path) / "raw-response.txt"
-            ),
+            raw_response_path=raw_response_path,
             created_at=received_at,
         )
-        self._state_store.complete_classification(record)
+        try:
+            self._state_store.complete_classification(record)
+        except (StateStoreError, StateTransitionRefused):
+            return self._failure_after_start(
+                capture_id,
+                classification_id,
+                "classification_persistence_failed",
+                raw_response_path=raw_response_path,
+            )
         return self._result(
             ClassificationStatus.CLASSIFIED,
             capture_id,
@@ -252,12 +339,21 @@ class ClassificationService:
         )
         if (
             record.capture_id != intake.capture_id
+            or intake.source_type != "cli-typed"
+            or intake.evidence_path != f"evidence/{intake.capture_id}"
+            or intake.trace_id != intake.capture_id
+            or intake.state_updated_at != record.created_at
+            or intake.failure_reason is not None
+            or not is_ulid(record.classification_id)
+            or not isinstance(record.candidate_type, str)
             or record.candidate_type not in ROUTING
+            or not isinstance(record.sensitivity, str)
             or record.sensitivity not in SENSITIVITIES
             or type(record.confidence) not in (int, float)
             or not math.isfinite(record.confidence)
             or not 0 <= record.confidence <= 1
             or record.routing != ROUTING[record.candidate_type]
+            or record.prompt_version != PROMPT_VERSION
             or record.raw_response_path != expected_raw_path
         ):
             return self._consistency_failure(intake.capture_id)
@@ -298,6 +394,58 @@ class ClassificationService:
             raw_response_path=record.raw_response_path,
             reason="already_classified",
             message="capture is already classified",
+        )
+
+    def _preserve_response(
+        self,
+        classification_id: str,
+        capture_id: str,
+        raw_text: str,
+        model_id: Optional[str],
+        received_at: str,
+    ) -> Optional[str]:
+        try:
+            evidence = self._response_store.create(
+                classification_id,
+                capture_id,
+                raw_text,
+                model_id,
+                PROMPT_VERSION,
+                received_at,
+            )
+            evidence = self._response_store.validate_directory(evidence.directory)
+        except ClassificationEvidenceError:
+            return None
+        return str(Path(evidence.evidence_path) / "raw-response.txt")
+
+    def _failure_from_model_error(
+        self,
+        capture_id: str,
+        classification_id: str,
+        error: ModelAdapterError,
+        reason: str,
+        received_at: str,
+    ) -> ClassificationResult:
+        raw_response_path = None
+        if error.raw_text is not None:
+            raw_response_path = self._preserve_response(
+                classification_id,
+                capture_id,
+                error.raw_text,
+                error.model_id,
+                received_at,
+            )
+            if raw_response_path is None:
+                return self._failure_after_start(
+                    capture_id,
+                    classification_id,
+                    "response_evidence_failed",
+                )
+        return self._failure_after_start(
+            capture_id,
+            classification_id,
+            reason,
+            raw_response_path=raw_response_path,
         )
 
     def _failure_after_start(
@@ -347,9 +495,9 @@ class ClassificationService:
         candidate_type = payload["candidate_type"]
         sensitivity = payload["sensitivity"]
         confidence = payload["confidence"]
-        if candidate_type not in ROUTING:
+        if not isinstance(candidate_type, str) or candidate_type not in ROUTING:
             raise ValueError("candidate type is invalid")
-        if sensitivity not in SENSITIVITIES:
+        if not isinstance(sensitivity, str) or sensitivity not in SENSITIVITIES:
             raise ValueError("sensitivity is invalid")
         if (
             type(confidence) not in (int, float)
