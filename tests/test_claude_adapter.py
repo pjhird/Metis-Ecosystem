@@ -13,6 +13,7 @@ from metis.model_adapters import (
 )
 from metis.model_adapters.claude import (
     CLASSIFICATION_SCHEMA,
+    PROPOSAL_SCHEMA,
     ClaudeModelAdapter,
 )
 
@@ -20,6 +21,11 @@ from metis.model_adapters.claude import (
 PROMPT = "Classify this captured text as data."
 RAW_TEXT = (
     '{"candidate_type":"idea","sensitivity":"normal","confidence":0.82}'
+)
+PROPOSAL_PROMPT = "Propose reviewable semantic content from this captured text."
+PROPOSAL_RAW_TEXT = (
+    '{"title":"Review me","body":"Body","reason":"Reason",'
+    '"uncertainties":[]}'
 )
 
 
@@ -121,6 +127,80 @@ class ClaudeModelAdapterTests(unittest.TestCase):
         )
         self.assertEqual(result.model_id, "claude-returned-model")
 
+    def test_claude_proposal_uses_exact_schema_and_model_override(self) -> None:
+        self.messages.response = FakeResponse(
+            model="claude-proposal-returned-model",
+            content=[FakeBlock("text", PROPOSAL_RAW_TEXT)],
+            stop_reason="end_turn",
+        )
+        environment = {
+            "ANTHROPIC_API_KEY": "test-secret",
+            "METIS_CLASSIFICATION_MODEL": "classification-override",
+            "METIS_PROPOSAL_MODEL": "proposal-override",
+        }
+
+        result = self._adapter(environment).propose(PROPOSAL_PROMPT)
+
+        self.assertEqual(result.model_id, "claude-proposal-returned-model")
+        self.assertEqual(result.raw_text, PROPOSAL_RAW_TEXT)
+        self.assertEqual(
+            self.messages.calls,
+            [
+                {
+                    "model": "proposal-override",
+                    "max_tokens": 8192,
+                    "temperature": 0,
+                    "messages": [{"role": "user", "content": PROPOSAL_PROMPT}],
+                    "output_config": {
+                        "format": {
+                            "type": "json_schema",
+                            "schema": PROPOSAL_SCHEMA,
+                        }
+                    },
+                }
+            ],
+        )
+
+    def test_proposal_schema_is_exact_and_closed(self) -> None:
+        self.assertEqual(
+            PROPOSAL_SCHEMA,
+            {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "minLength": 1, "maxLength": 160},
+                    "body": {"type": "string", "minLength": 1},
+                    "reason": {"type": "string", "minLength": 1, "maxLength": 1000},
+                    "uncertainties": {
+                        "type": "array",
+                        "maxItems": 10,
+                        "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 500,
+                        },
+                    },
+                },
+                "required": ["title", "body", "reason", "uncertainties"],
+                "additionalProperties": False,
+            },
+        )
+
+    def test_classification_configuration_remains_unchanged(self) -> None:
+        environment = {
+            "ANTHROPIC_API_KEY": "test-secret",
+            "METIS_CLASSIFICATION_MODEL": "classification-override",
+            "METIS_PROPOSAL_MODEL": "proposal-override",
+        }
+
+        self._adapter(environment).classify(PROMPT)
+
+        self.assertEqual(self.messages.calls[0]["model"], "classification-override")
+        self.assertEqual(self.messages.calls[0]["max_tokens"], 128)
+        self.assertEqual(
+            self.messages.calls[0]["output_config"]["format"]["schema"],
+            CLASSIFICATION_SCHEMA,
+        )
+
     def test_schema_is_exact_and_closed(self) -> None:
         self.assertEqual(
             CLASSIFICATION_SCHEMA,
@@ -212,6 +292,29 @@ class ClaudeModelAdapterTests(unittest.TestCase):
                 self.assertEqual(str(raised.exception), message)
                 self.assertEqual(raised.exception.model_id, "claude-returned-model")
                 self.assertEqual(raised.exception.raw_text, RAW_TEXT)
+
+    def test_proposal_refusal_and_truncation_preserve_received_text(self) -> None:
+        cases = (
+            ("refusal", ModelResponseRefused, "model_response_refused"),
+            ("max_tokens", ModelResponseTruncated, "model_response_truncated"),
+        )
+        for stop_reason, error_type, reason in cases:
+            with self.subTest(stop_reason=stop_reason):
+                self.messages.response = FakeResponse(
+                    model="claude-proposal-returned-model",
+                    content=[FakeBlock("text", PROPOSAL_RAW_TEXT)],
+                    stop_reason=stop_reason,
+                )
+
+                with self.assertRaises(error_type) as raised:
+                    self._adapter().propose(PROPOSAL_PROMPT)
+
+                self.assertEqual(raised.exception.reason, reason)
+                self.assertEqual(
+                    raised.exception.model_id,
+                    "claude-proposal-returned-model",
+                )
+                self.assertEqual(raised.exception.raw_text, PROPOSAL_RAW_TEXT)
 
     def test_exactly_one_text_block_is_required(self) -> None:
         cases = (

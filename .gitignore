@@ -20,6 +20,8 @@ htmlcov/
 state/
 evidence/
 classification-evidence/
+proposal-evidence/
+proposal-content/
 vault/
 *.db
 *.sqlite

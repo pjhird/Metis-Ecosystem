@@ -17,7 +17,11 @@ from .classification import (
 )
 from .classification_evidence import ClassificationEvidenceStore
 from .data_access import SQLiteStateStore
+from .draft_notes import DraftNoteStore
 from .evidence import EvidenceStore
+from .proposal import ProposalResult, ProposalService, ProposalStatus
+from .proposal_content import ProposalContentStore
+from .proposal_evidence import ProposalEvidenceStore
 
 
 def main(
@@ -32,6 +36,8 @@ def main(
     capture_parser.add_argument("text")
     classify_parser = subparsers.add_parser("classify")
     classify_parser.add_argument("capture_id")
+    propose_parser = subparsers.add_parser("propose")
+    propose_parser.add_argument("capture_id")
     arguments = parser.parse_args(argv)
 
     root = Path.cwd() if runtime_root is None else Path(runtime_root)
@@ -44,7 +50,7 @@ def main(
                 result = CaptureService(state_store, EvidenceStore(root)).capture(
                     arguments.text
                 )
-            else:
+            elif arguments.command == "classify":
                 if model_adapter_factory is None:
                     from .model_adapters.claude import ClaudeModelAdapter
 
@@ -58,7 +64,24 @@ def main(
                     model_adapter,
                     root,
                 ).classify(arguments.capture_id)
-    except Exception as error:
+            else:
+                if model_adapter_factory is None:
+                    from .model_adapters.claude import ClaudeModelAdapter
+
+                    model_adapter = ClaudeModelAdapter()
+                else:
+                    model_adapter = model_adapter_factory()
+                result = ProposalService(
+                    state_store,
+                    EvidenceStore(root),
+                    ClassificationEvidenceStore(root),
+                    ProposalEvidenceStore(root),
+                    ProposalContentStore(root),
+                    DraftNoteStore(root),
+                    model_adapter,
+                    root,
+                ).propose(arguments.capture_id)
+    except Exception:
         if initialized:
             raise
         if arguments.command == "capture":
@@ -67,9 +90,9 @@ def main(
                 None,
                 None,
                 "state_initialization_failed",
-                str(error),
+                "state initialization failed",
             )
-        else:
+        elif arguments.command == "classify":
             result = ClassificationResult(
                 ClassificationStatus.FAILED,
                 arguments.capture_id,
@@ -80,7 +103,25 @@ def main(
                 None,
                 None,
                 "state_initialization_failed",
-                str(error),
+                "state initialization failed",
+            )
+        else:
+            result = ProposalResult(
+                status=ProposalStatus.FAILED,
+                capture_id=arguments.capture_id,
+                classification_id=None,
+                proposal_id=None,
+                note_type=None,
+                title=None,
+                confidence=None,
+                sensitivity=None,
+                risk_level=None,
+                raw_response_path=None,
+                content_path=None,
+                draft_path=None,
+                intake_state=None,
+                reason="state_initialization_failed",
+                message="state initialization failed",
             )
 
     payload = asdict(result)

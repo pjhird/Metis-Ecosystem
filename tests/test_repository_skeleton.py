@@ -17,6 +17,9 @@ class RepositorySkeletonTests(unittest.TestCase):
             "state/metis.db",
             "evidence/capture/raw.txt",
             "classification-evidence/classification/raw-response.txt",
+            "proposal-evidence/proposal/raw-response.txt",
+            "proposal-content/proposal/body.md",
+            "vault/notes/proposed/note.md",
             "vault/notes/filed/note.md",
             "metis/__pycache__/module.cpython-39.pyc",
             ".coverage",
@@ -93,6 +96,23 @@ class RepositorySkeletonTests(unittest.TestCase):
                 },
             },
         )
+
+    def test_step_four_governed_documentation_is_current(self) -> None:
+        agents = (REPOSITORY_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        schemas = (REPOSITORY_ROOT / "METIS-SCHEMAS.md").read_text(encoding="utf-8")
+        ledger = (REPOSITORY_ROOT / "METIS-REQUIREMENT-LEDGER.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('metis propose "<capture-id>"', agents)
+        self.assertIn("migration `003_proposal_reservation.sql`", schemas)
+        self.assertIn("### 2.4 `proposal_reservation`", schemas)
+        self.assertIn("build-order step 4", ledger)
+        gov_row = next(
+            line for line in ledger.splitlines() if line.startswith("| REQ-GOV-003 ")
+        )
+        self.assertIn("| Partial |", gov_row)
+        self.assertIn("test_capture_classify_propose_and_replay_stop_before_step_five", gov_row)
 
 
 if __name__ == "__main__":

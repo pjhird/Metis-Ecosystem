@@ -12,6 +12,8 @@ from metis.data_access import (
     IntakeRegistrationResult,
     IntakeRegistrationStatus,
     MigrationError,
+    ProposalRecord,
+    ProposalReservationRecord,
     SQLiteStateStore,
     StateStore,
 )
@@ -51,11 +53,25 @@ EXPECTED_COLUMNS = {
         "proposed_links",
         "evidence_refs",
         "confidence",
+        "sensitivity",
         "risk_level",
         "reason",
+        "uncertainties_json",
+        "model_id",
+        "prompt_version",
+        "raw_response_path",
+        "content_hash",
         "draft_note_path",
         "state",
         "created_at",
+    ),
+    "proposal_reservation": (
+        "proposal_id",
+        "capture_id",
+        "classification_id",
+        "lease_token",
+        "reserved_at",
+        "lease_expires_at",
     ),
     "approval": (
         "approval_id",
@@ -82,6 +98,7 @@ NULLABLE_COLUMNS = {
     "intake": {"failure_reason"},
     "classification": set(),
     "proposal": {"draft_note_path"},
+    "proposal_reservation": set(),
     "approval": {"committed_at", "revoked_at"},
     "audit_event": {"capture_id"},
 }
@@ -90,6 +107,7 @@ PRIMARY_KEYS = {
     "intake": "capture_id",
     "classification": "classification_id",
     "proposal": "proposal_id",
+    "proposal_reservation": "proposal_id",
     "approval": "approval_id",
     "audit_event": "event_id",
 }
@@ -132,6 +150,66 @@ class FakeStateStore:
     ) -> IntakeRecord:
         raise NotImplementedError
 
+    def find_proposal_by_capture_id(
+        self, capture_id: str
+    ) -> ProposalRecord | None:
+        return None
+
+    def find_proposal_reservation_by_capture_id(
+        self, capture_id: str
+    ) -> ProposalReservationRecord | None:
+        return None
+
+    def begin_proposal(
+        self, reservation: ProposalReservationRecord
+    ) -> ProposalReservationRecord:
+        raise NotImplementedError
+
+    def reclaim_proposal(
+        self,
+        expected: ProposalReservationRecord,
+        replacement: ProposalReservationRecord,
+        reclaimed_at: str,
+    ) -> ProposalReservationRecord:
+        raise NotImplementedError
+
+    def record_proposal_failure(
+        self,
+        capture_id: str,
+        lease_token: str,
+        reason: str,
+        failed_at: str,
+    ) -> IntakeRecord:
+        raise NotImplementedError
+
+    def complete_proposal(
+        self, record: ProposalRecord, lease_token: str
+    ) -> ProposalRecord:
+        raise NotImplementedError
+
+    def record_draft_failure(
+        self,
+        capture_id: str,
+        proposal_id: str,
+        reason: str,
+        failed_at: str,
+    ) -> IntakeRecord:
+        raise NotImplementedError
+
+    def resume_proposal_draft(
+        self, capture_id: str, proposal_id: str, resumed_at: str
+    ) -> IntakeRecord:
+        raise NotImplementedError
+
+    def register_proposal_draft(
+        self,
+        capture_id: str,
+        proposal_id: str,
+        draft_note_path: str,
+        registered_at: str,
+    ) -> ProposalRecord:
+        raise NotImplementedError
+
 
 class MigrationTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -144,6 +222,22 @@ class MigrationTests(unittest.TestCase):
         self.addCleanup(store.close)
         store.initialize()
         return store
+
+    def _initialize_version_two(self) -> None:
+        self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        migrations = Path(__file__).resolve().parents[2] / "metis" / "data_access" / "migrations"
+        scripts = [
+            (migrations / "001_initial.sql").read_text(encoding="utf-8"),
+            (migrations / "002_unique_classification_capture.sql").read_text(
+                encoding="utf-8"
+            ),
+        ]
+        with sqlite3.connect(self.database_path) as connection:
+            connection.executescript(
+                "BEGIN IMMEDIATE;\n"
+                + "\n".join(scripts)
+                + "\nPRAGMA user_version = 2;\nCOMMIT;"
+            )
 
     def _column_rows(self, table: str) -> list[tuple]:
         with sqlite3.connect(self.database_path) as connection:
@@ -169,6 +263,20 @@ class MigrationTests(unittest.TestCase):
         with sqlite3.connect(self.database_path) as connection:
             rows = connection.execute(f"PRAGMA foreign_key_list({table})").fetchall()
         return {(row[3], row[2], row[4]) for row in rows}
+
+    def _unique_indexes(self, table: str) -> set[tuple[str, ...]]:
+        with sqlite3.connect(self.database_path) as connection:
+            indexes = connection.execute(f"PRAGMA index_list({table})").fetchall()
+            return {
+                tuple(
+                    row[2]
+                    for row in connection.execute(
+                        f"PRAGMA index_info({index[1]})"
+                    ).fetchall()
+                )
+                for index in indexes
+                if index[2]
+            }
 
     def _insert_valid_intake(self, connection: sqlite3.Connection) -> None:
         connection.execute(
@@ -218,6 +326,42 @@ class MigrationTests(unittest.TestCase):
             """
             INSERT INTO proposal (
                 proposal_id, capture_id, classification_id, note_type, title,
+                body_path, proposed_links, evidence_refs, confidence, sensitivity,
+                risk_level, reason, uncertainties_json, model_id, prompt_version,
+                raw_response_path, content_hash, draft_note_path, state, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "proposal-1",
+                "01J8X2K4P7M3QRSTVWXYZ0ABCD",
+                "classification-1",
+                "idea",
+                "Title",
+                "proposals/proposal-1.md",
+                "[]",
+                "[]",
+                0.8,
+                "normal",
+                "low",
+                "Captured as an idea",
+                "[]",
+                "model-1",
+                "propose-v1",
+                "proposal-evidence/proposal-1/raw-response.txt",
+                "a" * 64,
+                None,
+                "pending",
+                "2026-07-31T12:00:02Z",
+            ),
+        )
+
+    def _insert_valid_version_two_proposal(
+        self, connection: sqlite3.Connection
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO proposal (
+                proposal_id, capture_id, classification_id, note_type, title,
                 body_path, proposed_links, evidence_refs, confidence, risk_level,
                 reason, draft_note_path, state, created_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -243,10 +387,10 @@ class MigrationTests(unittest.TestCase):
     def test_state_store_contract_is_engine_agnostic(self) -> None:
         self.assertIsInstance(FakeStateStore(), StateStore)
 
-    def test_initial_migration_creates_only_the_five_operational_tables(self) -> None:
+    def test_migration_three_creates_six_operational_tables(self) -> None:
         store = self._initialize()
 
-        self.assertEqual(store.schema_version, 2)
+        self.assertEqual(store.schema_version, 3)
         with sqlite3.connect(self.database_path) as connection:
             rows = connection.execute(
                 "SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name"
@@ -275,6 +419,21 @@ class MigrationTests(unittest.TestCase):
             {
                 ("capture_id", "intake", "capture_id"),
                 ("classification_id", "classification", "classification_id"),
+            },
+        )
+
+    def test_proposal_reservation_schema_matches_contract(self) -> None:
+        self._initialize()
+        self._assert_column_contract("proposal_reservation")
+        self.assertEqual(
+            self._foreign_keys("proposal_reservation"),
+            {
+                ("capture_id", "intake", "capture_id"),
+                (
+                    "classification_id",
+                    "classification",
+                    "classification_id",
+                ),
             },
         )
 
@@ -347,6 +506,34 @@ class MigrationTests(unittest.TestCase):
                     with self.assertRaises(sqlite3.IntegrityError):
                         connection.execute(statement, parameters)
 
+    def test_proposing_is_a_valid_intake_state(self) -> None:
+        self._initialize()
+        with sqlite3.connect(self.database_path) as connection:
+            connection.execute(
+                """
+                INSERT INTO intake (
+                    capture_id, content_hash, captured_at, source_type,
+                    evidence_path, state, state_updated_at, trace_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "capture-proposing",
+                    "sha256:proposing",
+                    "2026-08-02T12:00:00Z",
+                    "cli-typed",
+                    "evidence/capture-proposing",
+                    "proposing",
+                    "2026-08-02T12:00:01Z",
+                    "trace-proposing",
+                ),
+            )
+
+            state = connection.execute(
+                "SELECT state FROM intake WHERE capture_id = 'capture-proposing'"
+            ).fetchone()
+
+        self.assertEqual(state, ("proposing",))
+
     def test_classification_enums_and_confidence_are_enforced(self) -> None:
         self._initialize()
         statement = """
@@ -410,14 +597,31 @@ class MigrationTests(unittest.TestCase):
                     ),
                 )
 
+    def test_proposal_capture_and_classification_are_unique(self) -> None:
+        self._initialize()
+
+        unique_indexes = self._unique_indexes("proposal")
+
+        self.assertIn(("capture_id",), unique_indexes)
+        self.assertIn(("classification_id",), unique_indexes)
+
+    def test_reservation_capture_and_classification_are_unique(self) -> None:
+        self._initialize()
+
+        unique_indexes = self._unique_indexes("proposal_reservation")
+
+        self.assertIn(("capture_id",), unique_indexes)
+        self.assertIn(("classification_id",), unique_indexes)
+
     def test_proposal_enums_and_confidence_are_enforced(self) -> None:
         self._initialize()
         statement = """
             INSERT INTO proposal (
                 proposal_id, capture_id, classification_id, note_type, title,
-                body_path, proposed_links, evidence_refs, confidence, risk_level,
-                reason, draft_note_path, state, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                body_path, proposed_links, evidence_refs, confidence, sensitivity,
+                risk_level, reason, uncertainties_json, model_id, prompt_version,
+                raw_response_path, content_hash, draft_note_path, state, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         valid = [
             "proposal-invalid",
@@ -429,8 +633,14 @@ class MigrationTests(unittest.TestCase):
             "[]",
             "[]",
             0.8,
+            "normal",
             "low",
             "Reason",
+            "[]",
+            "model-1",
+            "propose-v1",
+            "proposal-evidence/proposal-invalid/raw-response.txt",
+            "a" * 64,
             None,
             "pending",
             "2026-07-31T12:00:02Z",
@@ -443,8 +653,9 @@ class MigrationTests(unittest.TestCase):
             for index, invalid_value in (
                 (3, "unknown"),
                 (8, -0.1),
-                (9, "critical"),
-                (12, "filed"),
+                (9, "public"),
+                (10, "critical"),
+                (18, "filed"),
             ):
                 parameters = valid.copy()
                 parameters[index] = invalid_value
@@ -505,8 +716,64 @@ class MigrationTests(unittest.TestCase):
     def test_reapplying_migrations_is_idempotent(self) -> None:
         store = self._initialize()
         store.initialize()
-        self.assertEqual(store.schema_version, 2)
+        self.assertEqual(store.schema_version, 3)
         self.assertEqual(self._columns("intake"), EXPECTED_COLUMNS["intake"])
+
+    def test_migration_preserves_existing_intake_and_classification_rows(self) -> None:
+        self._initialize_version_two()
+        with sqlite3.connect(self.database_path) as connection:
+            self._insert_valid_intake(connection)
+            self._insert_valid_classification(connection)
+            connection.execute(
+                """
+                INSERT INTO audit_event (
+                    event_id, trace_id, capture_id, actor, action,
+                    outcome, detail, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "event-before-step-four",
+                    "trace-1",
+                    "01J8X2K4P7M3QRSTVWXYZ0ABCD",
+                    "orchestrator",
+                    "capture.written",
+                    "success",
+                    "{}",
+                    "2026-07-31T12:00:01Z",
+                ),
+            )
+        store = self._initialize()
+
+        self.assertEqual(store.schema_version, 3)
+        with sqlite3.connect(self.database_path) as connection:
+            intake_count = connection.execute("SELECT COUNT(*) FROM intake").fetchone()
+            classification_count = connection.execute(
+                "SELECT COUNT(*) FROM classification"
+            ).fetchone()
+            audit_count = connection.execute(
+                "SELECT COUNT(*) FROM audit_event"
+            ).fetchone()
+
+        self.assertEqual(intake_count, (1,))
+        self.assertEqual(classification_count, (1,))
+        self.assertEqual(audit_count, (1,))
+
+    def test_migration_refuses_unverifiable_preexisting_proposal_rows(self) -> None:
+        self._initialize_version_two()
+        with sqlite3.connect(self.database_path) as connection:
+            self._insert_valid_intake(connection)
+            self._insert_valid_classification(connection)
+            self._insert_valid_version_two_proposal(connection)
+        store = SQLiteStateStore(self.database_path)
+        self.addCleanup(store.close)
+
+        with self.assertRaises(MigrationError):
+            store.initialize()
+
+        self.assertEqual(store.schema_version, 2)
+        with sqlite3.connect(self.database_path) as connection:
+            count = connection.execute("SELECT COUNT(*) FROM proposal").fetchone()
+        self.assertEqual(count, (1,))
 
     def test_failed_migration_rolls_back_only_its_partial_changes(self) -> None:
         migration_directory = Path(self.temporary_directory.name) / "migrations"
@@ -566,13 +833,13 @@ class MigrationTests(unittest.TestCase):
     def test_newer_database_schema_fails_closed(self) -> None:
         self.database_path.parent.mkdir(parents=True)
         with sqlite3.connect(self.database_path) as connection:
-            connection.execute("PRAGMA user_version = 3")
+            connection.execute("PRAGMA user_version = 4")
         store = SQLiteStateStore(self.database_path)
         self.addCleanup(store.close)
 
         with self.assertRaisesRegex(
             MigrationError,
-            "database schema version 3 is newer than supported version 2",
+            "database schema version 4 is newer than supported version 3",
         ):
             store.initialize()
 

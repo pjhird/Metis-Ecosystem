@@ -3,10 +3,12 @@
 > The information and state model required by [METIS-EXECUTION-BLUEPRINT.md](METIS-EXECUTION-BLUEPRINT.md)
 > Phase 1. Decisions referenced are in [METIS-DECISIONS.md](METIS-DECISIONS.md).
 >
-> The five operational-state tables are implemented by
+> The first five operational-state tables are implemented by
 > `metis/data_access/migrations/001_initial.sql`; migration `002_unique_classification_capture.sql` enforces one
-> classification per capture. Source and classification-response evidence storage are implemented; the
-> Obsidian notes described here remain unimplemented.
+> classification per capture; migration `003_proposal_reservation.sql` adds reservation-first proposal state,
+> the expanded proposal contract, and replay uniqueness. Source, classification-response, proposal-response,
+> canonical proposal-content, and proposed-draft storage are implemented. Approval, permanent filing, linking,
+> and audit behavior remain unimplemented.
 
 ## Scope
 
@@ -90,6 +92,19 @@ Rules:
 - Response evidence is separate from immutable source evidence and is never permanent knowledge.
 - Partial, colliding, corrupt, or inconsistent response evidence is preserved and fails closed; Metis does not repair it automatically.
 
+### 1.3 Proposal response evidence and canonical content
+
+The exact provider response is append-only at
+`proposal-evidence/<proposal_id>/{raw-response.txt,meta.json}`. Its metadata binds the proposal, classification,
+capture, actual model, immutable `propose-v1` prompt version, received timestamp, and byte count. Metis validates
+that evidence before parsing it.
+
+Validated semantic content is rendered separately at
+`proposal-content/<proposal_id>/{body.md,meta.json}`. Its metadata binds the same identities, the raw-response
+SHA-256, canonical body SHA-256, and byte count. Neither store is durable knowledge. Complete matching artifacts
+may be reused during explicit crash recovery; partial, corrupt, colliding, symlinked, or disagreeing artifacts
+fail closed and are never repaired or overwritten.
+
 ---
 
 ## 2. Operational state (SQLite)
@@ -136,24 +151,47 @@ a fact, and Step 3 grants it no write authority over durable knowledge.
 | Column | Type | Notes |
 |---|---|---|
 | `proposal_id` | TEXT PK | ULID |
-| `capture_id` | TEXT FK → intake | |
-| `classification_id` | TEXT FK → classification | |
+| `capture_id` | TEXT FK → intake, UNIQUE | one proposal per capture |
+| `classification_id` | TEXT FK → classification, UNIQUE | replay/idempotency key |
 | `note_type` | TEXT | the typed note this would become |
 | `title` | TEXT | proposed title |
 | `body_path` | TEXT | proposed note body, on disk, not yet in the vault |
-| `proposed_links` | TEXT (JSON) | array of target note IDs — must resolve (REQ-INTK-004) |
+| `proposed_links` | TEXT (JSON) | exactly `[]` in Step 4; final link enforcement is Step 6 |
 | `evidence_refs` | TEXT (JSON) | everything this proposal rests on |
 | `confidence` | REAL | |
-| `risk_level` | TEXT | `low` · `medium` · `high` |
+| `sensitivity` | TEXT | copied from classification: `normal` · `sensitive` |
+| `risk_level` | TEXT | deterministic: `normal → low`, `sensitive → high` |
 | `reason` | TEXT | why this classification and destination |
+| `uncertainties_json` | TEXT (JSON) | validated unresolved points |
+| `model_id` | TEXT | actual proposal model returned by the adapter |
+| `prompt_version` | TEXT | exactly `propose-v1` |
+| `raw_response_path` | TEXT | exact proposal-response evidence path |
+| `content_hash` | TEXT | lowercase SHA-256 of canonical `body.md` bytes |
 | `draft_note_path` | TEXT NULL | where the draft was written in the vault |
 | `state` | TEXT | `pending` · `approved` · `rejected` · `superseded` |
 | `created_at` | TEXT | |
 
-Satisfies REQ-GOV-003. A proposal writes nothing permanent — the draft note in the vault is explicitly marked
-`status: proposed` and is not durable knowledge until approved.
+Partially implements REQ-GOV-003. A proposal writes nothing permanent — the draft note in the vault is
+explicitly marked `status: proposed` and is not durable knowledge. Approver and decision fields remain owned by
+Step 5.
 
-### 2.4 `approval`
+### 2.4 `proposal_reservation`
+
+Transient coordination for reservation-first proposal creation; it is not a proposal, approval, or audit row.
+
+| Column | Type | Notes |
+|---|---|---|
+| `proposal_id` | TEXT PK | stable ULID retained across reclaim |
+| `capture_id` | TEXT FK → intake, UNIQUE | |
+| `classification_id` | TEXT FK → classification, UNIQUE | |
+| `lease_token` | TEXT | UUID4 fencing token |
+| `reserved_at` | TEXT | canonical UTC timestamp |
+| `lease_expires_at` | TEXT | exactly 15 minutes after reservation or reclaim |
+
+An active lease refuses competing work. An explicit invocation may compare-and-swap reclaim an expired lease
+with the same proposal ID and a new token. A stale token cannot complete or record failure.
+
+### 2.5 `approval`
 
 | Column | Type | Notes |
 |---|---|---|
@@ -169,7 +207,7 @@ Satisfies REQ-GOV-003. A proposal writes nothing permanent — the draft note in
 `observed_status` records what the vault actually said, so a disputed approval can be reconstructed rather
 than inferred.
 
-### 2.5 `audit_event`
+### 2.6 `audit_event`
 
 Append-only. Never updated, never deleted.
 
@@ -192,10 +230,10 @@ recorded as such, not as an error.
 ## 3. Intake state machine
 
 ```text
-captured ──→ classifying ──→ classified ──→ proposed ──→ awaiting_approval
-                  │               │             │               │
-                  ↓               ↓             ↓               ├──→ approved ──→ filed
-                failed          failed        failed            └──→ rejected
+captured ──→ classifying ──→ classified ──→ proposing ──→ proposed ──→ awaiting_approval
+                  │               │             │            │               │
+                  ↓               ↓             ↓            ↓               ├──→ approved ──→ filed
+                failed          failed        failed        failed            └──→ rejected
 ```
 
 Legal transitions only. Any other jump is rejected by the orchestrator and recorded as `refused`
@@ -206,6 +244,7 @@ Legal transitions only. Any other jump is rejected by the orchestrator and recor
 | `captured` | Evidence written and hashed | Classification dispatched |
 | `classifying` | Model call in flight | Response received or timeout |
 | `classified` | Candidate type and confidence recorded | Proposal built |
+| `proposing` | One fenced reservation owns proposal generation | Proposal persisted or known failure recorded |
 | `proposed` | Proposal record exists | Draft written to vault |
 | `awaiting_approval` | Draft visible in Obsidian, `status: proposed` | Human flips the status |
 | `approved` | Approval recorded | Note committed |

@@ -14,12 +14,12 @@ Status vocabulary is the blueprint's own:
 - **Superseded** — replaced by a later decision
 
 Step 1 verified the repository and data-access foundation. Step 2 added immutable typed capture and exact
-replay protection. Step 3 adds explicit classification, a bounded provider seam, prompt-version persistence,
-raw-response preservation, deterministic routing, and fail-closed classification transitions. It does not
-verify a permanent note, proposal, vault, approval, filing, linking, or audit behavior. A requirement moves to
-Verified only when a test run or observed behavior proves it — never because a document mentions it.
+replay protection. Step 3 added explicit classification. Step 4 adds reservation-first proposal generation,
+exact response and canonical-content evidence, one `status: proposed` Obsidian draft, and replay/crash recovery.
+It does not verify approval detection, permanent filing, final links, or audit emission. A requirement moves to
+Verified only when a named test run or observed behavior proves it — never because a document mentions it.
 
-Last reviewed: 2026-08-01 · Repository state at review: build-order step 3
+Last reviewed: 2026-08-02 · Repository state at review: build-order step 4
 
 ---
 
@@ -29,7 +29,7 @@ Last reviewed: 2026-08-01 · Repository state at review: build-order step 3
 |---|---|---|---|---|---|
 | REQ-GOV-001 | No permanent knowledge write occurs without explicit human approval | MP §21–22, BP §7 | Missing | ADR-004, ADR-005 | `unapproved_write_is_refused` |
 | REQ-GOV-002 | System fails closed when permission, provenance, or approval state is undetermined | BP §7 | Missing | ADR-007 | Test: ambiguous approval state halts and creates a review item |
-| REQ-GOV-003 | Proposal records carry ID, evidence, proposed change, reason, confidence, affected records, risk, approver, decision, timestamp | BP §7 | Missing | Schema doc, `proposal` table | Schema validation test |
+| REQ-GOV-003 | Proposal records carry ID, evidence, proposed change, reason, confidence, affected records, risk, approver, decision, timestamp | BP §7 | Partial | `ProposalService`; migration 003; proposal artifacts and draft contract | `test_capture_classify_propose_and_replay_stop_before_step_five`, `test_valid_classified_capture_creates_proposal_and_draft`, and proposal schema tests prove the Step-4 fields. Still needed: Step-5 approver and decision evidence. |
 | REQ-GOV-004 | Approval is a real state transition, not a prose instruction | BP §7 | Missing | ADR-005, ADR-006 | Test: a note written directly to the vault without an approval record is not treated as approved |
 | REQ-GOV-005 | Agents and skills never expand their own permissions or self-assign skills | MP §22 | Deferred | — | Applies from Phase 8; no agents exist |
 
@@ -48,16 +48,16 @@ Last reviewed: 2026-08-01 · Repository state at review: build-order step 3
 | ID | Requirement | Source | Status | Design artifact | Evidence needed |
 |---|---|---|---|---|---|
 | REQ-INTK-001 | Capture preserves input immutably before any processing | BP §9, §11 | Verified | ADR-003, ADR-015; `EvidenceStore` | Byte-exact evidence and pre-registration ordering tests; `test_source_survives_classification_failure`; `test_model_failure_records_failed_and_preserves_source` |
-| REQ-INTK-002 | Replaying the same input creates no duplicate permanent record | BP §9, §11 | Partial | ADR-014 | Exact replay leaves one intake row and one evidence directory: `test_exact_replay_creates_one_row_and_one_evidence_directory`; matching state and evidence return `duplicate`: `test_exact_replay_returns_duplicate_for_matching_state_and_evidence`. Still needed for Verified: `duplicate_replay_creates_one_note` after permanent-note filing exists. |
+| REQ-INTK-002 | Replaying the same input creates no duplicate permanent record | BP §9, §11 | Partial | ADR-014; unique capture/classification proposal keys | Capture replay and `test_exact_replay_returns_duplicate_without_model_or_second_artifact` prove one intake, proposal, and proposed draft. `test_capture_classify_propose_and_replay_stop_before_step_five` proves the integrated replay. Still needed for Verified: `duplicate_replay_creates_one_note` after permanent filing exists. |
 | REQ-INTK-003 | Classification produces candidate type, sensitivity, routing, confidence | MP §24, BP §9 | Verified | `ClassificationService`, `classification` table | `test_valid_response_is_preserved_then_persisted`; `test_invalid_enum_confidence_boolean_nonfinite_and_out_of_range_are_rejected`; `test_capture_classify_and_replay_complete_local_path` |
 | REQ-INTK-004 | Approved intake links to an existing goal or project without duplicates or orphans | BP §13, Phase 6 | Missing | ADR-013, note schemas | `unresolvable_link_blocks_commit` |
-| REQ-INTK-005 | Failure preserves the source and produces a visible review state, never a false "complete" | BP §9, §11 | Partial | State machine failure states; classification reason codes | `test_source_survives_classification_failure`, response-preservation tests, and `test_completion_failure_never_reports_classified` pass. Still needed for Verified: the governed visible review item/surface, which is not built. |
+| REQ-INTK-005 | Failure preserves the source and produces a visible review state, never a false "complete" | BP §9, §11 | Partial | State machine failure states; classification/proposal reason codes; proposed draft | Source-preservation tests plus `test_failure_recording_failure_reports_state_undetermined`, artifact-failure tests, and `test_capture_classify_propose_and_replay_stop_before_step_five` prove honest Step-4 outcomes. Still needed: the complete approved/filed failure-review behavior. |
 
 ## Orchestration
 
 | ID | Requirement | Source | Status | Design artifact | Evidence needed |
 |---|---|---|---|---|---|
-| REQ-ORCH-001 | A deterministic orchestrator owns all state transitions | MP §18, BP §10 | Partial | ADR-007; `CaptureService`; `ClassificationService`; `StateStore` | Classification compare-and-swap and illegal-edge tests pass in `tests.data_access.test_classification_store`; proposal through audit transitions remain unimplemented. |
+| REQ-ORCH-001 | A deterministic orchestrator owns all state transitions | MP §18, BP §10 | Partial | ADR-007; capture/classification/proposal services; `StateStore` | Classification and proposal compare-and-swap tests pass; `test_reclaimed_token_fences_stale_worker_completion` and the integrated Step-4 test prove proposal orchestration. Approval through audit transitions remain unimplemented. |
 | REQ-ORCH-002 | Skills never call each other or reach persistence directly | BP §10 | Missing | ADR-007 | Permission test |
 | REQ-ORCH-003 | Time, cost, and retry limits established per execution | MP §14, §18 | Deferred | — | Low priority for a single-user MVP; named rather than dropped |
 | REQ-ORCH-004 | Every material action produces an audit event | MP §22, BP §7 | Missing | `audit_event` table | Test: each transition emits exactly one event |
@@ -67,7 +67,7 @@ Last reviewed: 2026-08-01 · Repository state at review: build-order step 3
 | ID | Requirement | Source | Status | Design artifact | Evidence needed |
 |---|---|---|---|---|---|
 | REQ-MODEL-001 | Providers are replaceable without rewriting the system | MP §30 | Verified | ADR-008; `ModelAdapter`; `ClaudeModelAdapter` | `test_model_adapter_contract_is_provider_neutral`; `test_provider_sdk_imported_only_by_adapter` |
-| REQ-MODEL-002 | Model output is a proposal, never a fact | MP §32, BP §7 | Partial | ADR-004; response evidence; classification state | Classification output is isolated as evidence/state and Step 3 has no vault path. Still needed: proposal and approval-gated vault tests. |
+| REQ-MODEL-002 | Model output is a proposal, never a fact | MP §32, BP §7 | Partial | ADR-004; proposal response/content evidence; proposed draft | `test_capture_classify_propose_and_replay_stop_before_step_five` proves model output stops as a pending proposal and `status: proposed` draft with zero approval/audit rows and no filed note. Permanent approval gating remains unimplemented. |
 | REQ-MODEL-003 | Prompt versions are recorded with each execution | MP §30 | Verified | packaged `classify-v1`; `classification.prompt_version` | `test_classification_prompt_is_immutable_version_one`; `test_valid_response_is_preserved_then_persisted`; `test_capture_classify_and_replay_complete_local_path` |
 
 ## Obsidian vault
@@ -76,7 +76,7 @@ Last reviewed: 2026-08-01 · Repository state at review: build-order step 3
 |---|---|---|---|---|---|
 | REQ-VLT-001 | A vault exists, separate from any pre-existing vault | README | Missing | Phase 1 | Directory inspection |
 | REQ-VLT-002 | Note schemas exist for Project, Goal, and typed intake notes | MP §23 | Missing | Schema doc | Frontmatter validation test |
-| REQ-VLT-003 | Obsidian is the approval surface via a status field | ADR-005 | Missing | ADR-005, ADR-006 | Test: approval command reads status correctly |
+| REQ-VLT-003 | Obsidian is the approval surface via a status field | ADR-005 | Partial | ADR-005, ADR-006; deterministic proposed draft | Draft tests prove `status` is the only human-editable field and approved/rejected values are preserved without Step-4 interpretation. Still needed: the Step-5 approval command reads and records it. |
 | REQ-VLT-004 | Every approved note carries provenance back to its evidence | BP §8 | Missing | Note schema `capture_id` + `evidence` fields | `note_without_provenance_fails_validation` |
 
 ## Security
@@ -84,7 +84,7 @@ Last reviewed: 2026-08-01 · Repository state at review: build-order step 3
 | ID | Requirement | Source | Status | Design artifact | Evidence needed |
 |---|---|---|---|---|---|
 | REQ-SEC-001 | Permission levels enforced technically, not by prompt wording | MP §22, §31, BP §7 | Missing | ADR-007 | Permission test suite |
-| REQ-SEC-002 | Credentials never enter Git history, the vault, or logs | MP §31 | Missing | ADR-017 | `secret_never_appears_in_logs_or_notes` |
+| REQ-SEC-002 | Credentials never enter Git history, the vault, or logs | MP §31 | Partial | ADR-017; proposal content screen | `test_unsafe_content_is_refused_without_echo_or_draft` proves screened proposal content reaches neither CLI nor vault. Still needed: the full `secret_never_appears_in_logs_or_notes` and Git-history scan. |
 | REQ-SEC-003 | External content is treated as untrusted; prompt injection resisted | MP §22 | Deferred | — | Applies when external content enters (ADR-016 blocks this for now) |
 
 ## Integrations
@@ -100,7 +100,7 @@ Last reviewed: 2026-08-01 · Repository state at review: build-order step 3
 |---|---|---|---|---|---|
 | REQ-TEST-001 | Critical negative tests exist and pass | BP §11 | Missing | Test plan | The nine tests named in AGENTS.md |
 | REQ-TEST-002 | No capability declared working without a recorded test run | BP §11 | Missing | — | Standing constraint on all reporting, including this ledger |
-| REQ-TEST-003 | Schema validation for every structured artifact | BP §11 | Partial | Schema doc; migrations 001–002; both evidence stores | SQLite constraints, source/response metadata, model JSON, and CLI result shapes are validated. Proposal, approval, audit-detail, and note schemas remain unimplemented. |
+| REQ-TEST-003 | Schema validation for every structured artifact | BP §11 | Partial | Schema doc; migrations 001–003; evidence/content/draft stores | SQLite constraints, all Step-2–4 evidence metadata, model JSON, proposal content, draft bytes, and CLI result shapes are validated. Approval, filed-note, and audit-detail validation remain unimplemented. |
 
 ## Repository and tooling
 
