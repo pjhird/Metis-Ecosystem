@@ -30,6 +30,28 @@ class IntakeRecord:
 
 
 @dataclass(frozen=True)
+class ClassificationRecord:
+    classification_id: str
+    capture_id: str
+    candidate_type: str
+    sensitivity: str
+    confidence: float
+    routing: str
+    model_id: str
+    prompt_version: str
+    raw_response_path: str
+    created_at: str
+
+
+class StateTransitionRefused(RuntimeError):
+    """Raised when a known intake state does not allow a requested transition."""
+
+    def __init__(self, message: str, record: IntakeRecord) -> None:
+        super().__init__(message)
+        self.record = record
+
+
+@dataclass(frozen=True)
 class IntakeRegistrationResult:
     status: IntakeRegistrationStatus
     record: IntakeRecord
@@ -55,5 +77,38 @@ class StateStore(Protocol):
     ) -> Optional[IntakeRecord]:
         """Return the intake row registered for a content hash, if one exists."""
 
+    def find_intake_by_capture_id(
+        self,
+        capture_id: str,
+    ) -> Optional[IntakeRecord]:
+        """Return the intake row registered for a capture ID, if one exists."""
+
+    def find_classification_by_capture_id(
+        self,
+        capture_id: str,
+    ) -> Optional[ClassificationRecord]:
+        """Return the classification for a capture ID, if one exists."""
+
     def register_intake(self, record: IntakeRecord) -> IntakeRegistrationResult:
         """Register a captured intake row or return the exact existing duplicate."""
+
+    def begin_classification(
+        self,
+        capture_id: str,
+        started_at: str,
+    ) -> IntakeRecord:
+        """Move an eligible intake into the classifying state."""
+
+    def complete_classification(
+        self,
+        record: ClassificationRecord,
+    ) -> ClassificationRecord:
+        """Atomically persist a classification and mark its intake classified."""
+
+    def record_classification_failure(
+        self,
+        capture_id: str,
+        reason: str,
+        failed_at: str,
+    ) -> IntakeRecord:
+        """Move a classifying intake into a known failed state."""
