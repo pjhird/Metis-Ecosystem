@@ -16,20 +16,22 @@ class RepositorySkeletonTests(unittest.TestCase):
             ".venv/pyvenv.cfg",
             "state/metis.db",
             "evidence/capture/raw.txt",
+            "classification-evidence/classification/raw-response.txt",
             "vault/notes/filed/note.md",
             "metis/__pycache__/module.cpython-39.pyc",
             ".coverage",
         )
 
-        result = subprocess.run(
-            ["git", "check-ignore", "--quiet", "--stdin"],
-            cwd=REPOSITORY_ROOT,
-            input="\n".join(paths),
-            text=True,
-            check=False,
-        )
+        for path in paths:
+            with self.subTest(path=path):
+                result = subprocess.run(
+                    ["git", "check-ignore", "--quiet", path],
+                    cwd=REPOSITORY_ROOT,
+                    text=True,
+                    check=False,
+                )
 
-        self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_governance_entrypoints_exist(self) -> None:
         self.assertTrue((REPOSITORY_ROOT / "AGENTS.md").is_file())

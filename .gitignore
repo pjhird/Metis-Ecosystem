@@ -19,6 +19,7 @@ htmlcov/
 # Runtime data never enters Git
 state/
 evidence/
+classification-evidence/
 vault/
 *.db
 *.sqlite
