@@ -346,11 +346,19 @@ class ProposalService:
             response.raw_response_hash,
             body_bytes,
         )
-        if content is None or not matches:
+        if content is None:
             return self._fail_reserved(
                 capture_id, classification, proposal_id, lease_token,
                 "proposal_content_failed",
                 raw_response_path=raw_response_path,
+                intake_state="proposing",
+            )
+        if not matches:
+            return self._fail_reserved(
+                capture_id, classification, proposal_id, lease_token,
+                "proposal_consistency_failed",
+                raw_response_path=raw_response_path,
+                content_path=content.content_path,
                 intake_state="proposing",
             )
         try:

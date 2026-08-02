@@ -622,7 +622,7 @@ class ProposalServiceTests(unittest.TestCase):
             f"proposal-content/{PROPOSAL_ID}/body.md",
         )
 
-    # Mutation caught: reusing a complete ProposalContentCollision winner with different bytes.
+    # Mutation caught: collapsing a validated content disagreement into proposal_content_failed.
     def test_disagreeing_content_race_winner_fails_closed(self) -> None:
         self._classified()
         adapter = InspectingAdapter(self.state_store)
@@ -632,7 +632,7 @@ class ProposalServiceTests(unittest.TestCase):
             content_store=MismatchedProposalContentStore(self.content_store),
         ).propose(CAPTURE_ID)
 
-        self._assert_recorded_attempt_failure(result, "proposal_content_failed")
+        self._assert_recorded_attempt_failure(result, "proposal_consistency_failed")
         self.assertEqual(len(adapter.proposal_prompts), 1)
         self.assertEqual(
             (
