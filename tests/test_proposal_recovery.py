@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from metis.classification_evidence import ClassificationEvidenceStore
 from metis.data_access import (
@@ -22,6 +23,7 @@ from metis.proposal_content import ProposalContentStore
 from metis.proposal_contract import parse_proposal_response, render_proposal_body
 from metis.proposal_evidence import ProposalEvidenceStore
 
+from tests.data_access.inspection import table_row_count
 from tests.test_proposal import (
     CAPTURE_ID,
     CLASSIFICATION_ID,
@@ -53,6 +55,222 @@ class RecoveryAdapter:
 
 class InjectedCrash(BaseException):
     pass
+
+
+class CrashAfterStateMutationStore:
+    def __init__(self, store: SQLiteStateStore, mutation: str) -> None:
+        self.store = store
+        self.mutation = mutation
+
+    def __getattr__(self, name):
+        attribute = getattr(self.store, name)
+        if name != self.mutation:
+            return attribute
+
+        def mutate_then_crash(*args, **kwargs):
+            attribute(*args, **kwargs)
+            raise InjectedCrash(f"crash after {name}")
+
+        return mutate_then_crash
+
+
+class _CrashAfterCloseStream:
+    def __init__(self, stream, message: str) -> None:
+        self._stream = stream
+        self._message = message
+
+    def __enter__(self):
+        self._stream.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self._stream.__exit__(exc_type, exc_value, traceback)
+        raise InjectedCrash(self._message)
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+class _CrashAfterEnterStream:
+    def __init__(self, stream, message: str) -> None:
+        self._stream = stream
+        self._message = message
+
+    def __enter__(self):
+        self._stream.__enter__()
+        self._stream.__exit__(None, None, None)
+        raise InjectedCrash(self._message)
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return False
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+class ProposalEvidenceCrashStore:
+    BEFORE_WRITE = "before_write"
+    AFTER_RAW_BYTES = "after_raw_bytes"
+    AFTER_METADATA = "after_metadata"
+
+    def __init__(
+        self,
+        store: ProposalEvidenceStore,
+        runtime_root: Path,
+        boundary: str,
+    ) -> None:
+        self.store = store
+        self.runtime_root = runtime_root
+        self.boundary = boundary
+
+    def create(self, *args, **kwargs):
+        if self.boundary == self.BEFORE_WRITE:
+            raise InjectedCrash("crash before proposal evidence write")
+        if self.boundary == self.AFTER_METADATA:
+            self.store.create(*args, **kwargs)
+            raise InjectedCrash("crash after proposal evidence metadata")
+        proposal_id = args[0]
+        raw_path = (
+            self.runtime_root
+            / "proposal-evidence"
+            / proposal_id
+            / "raw-response.txt"
+        )
+        original_open = Path.open
+
+        def crashing_open(path, *open_args, **open_kwargs):
+            stream = original_open(path, *open_args, **open_kwargs)
+            if path == raw_path and open_args == ("xb",):
+                return _CrashAfterCloseStream(
+                    stream,
+                    "crash after proposal response bytes",
+                )
+            return stream
+
+        with patch.object(Path, "open", crashing_open):
+            return self.store.create(*args, **kwargs)
+
+    def validate_directory(self, directory):
+        return self.store.validate_directory(directory)
+
+
+class ReadOnlyProposalEvidenceStore:
+    def __init__(self, store: ProposalEvidenceStore) -> None:
+        self.store = store
+
+    def create(self, *args, **kwargs):
+        raise AssertionError("restart must not rewrite proposal response evidence")
+
+    def validate_directory(self, directory):
+        return self.store.validate_directory(directory)
+
+
+class ProposalContentCrashStore:
+    BEFORE_WRITE = "before_write"
+    AFTER_BODY_BYTES = "after_body_bytes"
+    AFTER_METADATA = "after_metadata"
+
+    def __init__(
+        self,
+        store: ProposalContentStore,
+        runtime_root: Path,
+        boundary: str,
+    ) -> None:
+        self.store = store
+        self.runtime_root = runtime_root
+        self.boundary = boundary
+
+    def create(self, *args, **kwargs):
+        if self.boundary == self.BEFORE_WRITE:
+            raise InjectedCrash("crash before proposal content write")
+        if self.boundary == self.AFTER_METADATA:
+            self.store.create(*args, **kwargs)
+            raise InjectedCrash("crash after proposal content metadata")
+        proposal_id = args[0]
+        body_path = self.runtime_root / "proposal-content" / proposal_id / "body.md"
+        original_open = Path.open
+
+        def crashing_open(path, *open_args, **open_kwargs):
+            stream = original_open(path, *open_args, **open_kwargs)
+            if path == body_path and open_args == ("xb",):
+                return _CrashAfterCloseStream(
+                    stream,
+                    "crash after proposal content bytes",
+                )
+            return stream
+
+        with patch.object(Path, "open", crashing_open):
+            return self.store.create(*args, **kwargs)
+
+    def validate_directory(self, directory):
+        return self.store.validate_directory(directory)
+
+
+class ReadOnlyProposalContentStore:
+    def __init__(self, store: ProposalContentStore) -> None:
+        self.store = store
+
+    def create(self, *args, **kwargs):
+        raise AssertionError("restart must not rewrite proposal content")
+
+    def validate_directory(self, directory):
+        return self.store.validate_directory(directory)
+
+
+class DraftCrashStore:
+    AFTER_EXCLUSIVE_CREATE = "after_exclusive_create"
+    AFTER_EXACT_CLOSE = "after_exact_close"
+    AFTER_VALIDATION = "after_validation"
+
+    def __init__(
+        self,
+        store: DraftNoteStore,
+        runtime_root: Path,
+        boundary: str,
+    ) -> None:
+        self.store = store
+        self.runtime_root = runtime_root
+        self.boundary = boundary
+
+    def create(self, relative_path, expected_bytes):
+        if self.boundary == self.AFTER_VALIDATION:
+            return self.store.create(relative_path, expected_bytes)
+        draft_path = self.runtime_root / relative_path
+        original_open = Path.open
+
+        def crashing_open(path, *open_args, **open_kwargs):
+            stream = original_open(path, *open_args, **open_kwargs)
+            if path != draft_path or open_args != ("xb",):
+                return stream
+            if self.boundary == self.AFTER_EXCLUSIVE_CREATE:
+                return _CrashAfterEnterStream(
+                    stream,
+                    "crash after exclusive draft creation",
+                )
+            return _CrashAfterCloseStream(
+                stream,
+                "crash after exact draft close",
+            )
+
+        with patch.object(Path, "open", crashing_open):
+            return self.store.create(relative_path, expected_bytes)
+
+    def validate(self, relative_path, expected_bytes):
+        record = self.store.validate(relative_path, expected_bytes)
+        if self.boundary == self.AFTER_VALIDATION:
+            raise InjectedCrash("crash after exact draft validation")
+        return record
+
+
+class ReadOnlyDraftStore:
+    def __init__(self, store: DraftNoteStore) -> None:
+        self.store = store
+
+    def create(self, relative_path, expected_bytes):
+        raise AssertionError("restart must not rewrite an existing draft")
+
+    def validate(self, relative_path, expected_bytes):
+        return self.store.validate(relative_path, expected_bytes)
 
 
 class CrashingDraftStore:
@@ -174,6 +392,7 @@ class ProposalRecoveryTests(unittest.TestCase):
         *,
         state_store=None,
         draft_store=None,
+        proposal_evidence_store=None,
         content_store=None,
         proposal_id_factory=lambda: PROPOSAL_ID,
         lease_token_factory=lambda: LEASE_TOKEN,
@@ -184,7 +403,11 @@ class ProposalRecoveryTests(unittest.TestCase):
             self.state_store if state_store is None else state_store,
             self.evidence_store,
             self.classification_store,
-            self.proposal_evidence_store,
+            (
+                self.proposal_evidence_store
+                if proposal_evidence_store is None
+                else proposal_evidence_store
+            ),
             self.content_store if content_store is None else content_store,
             self.draft_store if draft_store is None else draft_store,
             adapter,
@@ -234,6 +457,500 @@ class ProposalRecoveryTests(unittest.TestCase):
             "propose-v1",
             "2026-08-02T20:00:00Z",
         )
+
+    # Mutation caught: moving the provider call before the durable reservation.
+    def test_crash_after_reservation_reclaims_one_stable_proposal_id(self):
+        crashing_state = CrashAfterStateMutationStore(
+            self.state_store,
+            "begin_proposal",
+        )
+        first_adapter = RecoveryAdapter()
+
+        with self.assertRaises(InjectedCrash):
+            self._service(
+                first_adapter,
+                state_store=crashing_state,
+            ).propose(CAPTURE_ID)
+
+        reservation = self.state_store.find_proposal_reservation_by_capture_id(
+            CAPTURE_ID
+        )
+        self.assertEqual(reservation.proposal_id, PROPOSAL_ID)
+        self.assertEqual(first_adapter.calls, 0)
+        self.assertEqual(
+            self.state_store.find_intake_by_capture_id(CAPTURE_ID).state,
+            "proposing",
+        )
+        self.assertIsNone(self.state_store.find_proposal_by_capture_id(CAPTURE_ID))
+
+        active = self._service(
+            RecoveryAdapter(allow_call=False),
+            proposal_id_factory=lambda: (_ for _ in ()).throw(AssertionError()),
+            lease_token_factory=lambda: RECLAIMED_TOKEN,
+            at_minute=14,
+        ).propose(CAPTURE_ID)
+        self.assertEqual(active.status, ProposalStatus.REFUSED)
+        self.assertEqual(active.reason, "proposal_in_progress")
+        self.assertEqual(active.proposal_id, PROPOSAL_ID)
+
+        recovered_adapter = RecoveryAdapter()
+        recovered = self._service(
+            recovered_adapter,
+            proposal_id_factory=lambda: (_ for _ in ()).throw(AssertionError()),
+            lease_token_factory=lambda: RECLAIMED_TOKEN,
+            at_minute=16,
+        ).propose(CAPTURE_ID)
+
+        self.assertEqual(recovered.status, ProposalStatus.PROPOSED)
+        self.assertEqual(recovered.proposal_id, PROPOSAL_ID)
+        self.assertEqual(recovered_adapter.calls, 1)
+        self.assertEqual(table_row_count(self.state_store, "proposal"), 1)
+        self.assertEqual(
+            table_row_count(self.state_store, "proposal_reservation"),
+            0,
+        )
+
+    # Mutation caught: reporting success after provider return before response
+    # evidence exists.
+    def test_crash_after_provider_return_repeats_once_only_after_reclaim(self):
+        first_adapter = RecoveryAdapter()
+        crashing_evidence = ProposalEvidenceCrashStore(
+            self.proposal_evidence_store,
+            self.runtime_root,
+            ProposalEvidenceCrashStore.BEFORE_WRITE,
+        )
+
+        with self.assertRaises(InjectedCrash):
+            self._service(
+                first_adapter,
+                proposal_evidence_store=crashing_evidence,
+            ).propose(CAPTURE_ID)
+
+        self.assertEqual(first_adapter.calls, 1)
+        self.assertIsNone(self.state_store.find_proposal_by_capture_id(CAPTURE_ID))
+        self.assertFalse((self.runtime_root / "vault").exists())
+        self.assertFalse(
+            (self.runtime_root / "proposal-evidence" / PROPOSAL_ID).exists()
+        )
+
+        second_adapter = RecoveryAdapter()
+        recovered = self._service(
+            second_adapter,
+            proposal_id_factory=lambda: (_ for _ in ()).throw(AssertionError()),
+            lease_token_factory=lambda: RECLAIMED_TOKEN,
+            at_minute=16,
+        ).propose(CAPTURE_ID)
+
+        self.assertEqual(recovered.status, ProposalStatus.PROPOSED)
+        self.assertEqual(recovered.proposal_id, PROPOSAL_ID)
+        self.assertEqual(second_adapter.calls, 1)
+        self.assertEqual(table_row_count(self.state_store, "proposal"), 1)
+        self.assertEqual(
+            len(list((self.runtime_root / "vault/notes/proposed").iterdir())),
+            1,
+        )
+
+    # Mutation caught: repairing or overwriting raw-only response evidence on restart.
+    def test_crash_after_response_bytes_preserves_partial_evidence_and_fails_closed(
+        self,
+    ):
+        crashing_evidence = ProposalEvidenceCrashStore(
+            self.proposal_evidence_store,
+            self.runtime_root,
+            ProposalEvidenceCrashStore.AFTER_RAW_BYTES,
+        )
+
+        with self.assertRaises(InjectedCrash):
+            self._service(
+                RecoveryAdapter(),
+                proposal_evidence_store=crashing_evidence,
+            ).propose(CAPTURE_ID)
+
+        response_directory = self.runtime_root / "proposal-evidence" / PROPOSAL_ID
+        raw_path = response_directory / "raw-response.txt"
+        before = raw_path.read_bytes()
+        self.assertEqual(before, PROPOSAL_RAW.encode("utf-8"))
+        self.assertEqual(
+            {path.name for path in response_directory.iterdir()},
+            {"raw-response.txt"},
+        )
+        adapter = RecoveryAdapter(allow_call=False)
+
+        result = self._service(
+            adapter,
+            proposal_evidence_store=ReadOnlyProposalEvidenceStore(
+                self.proposal_evidence_store
+            ),
+            proposal_id_factory=lambda: (_ for _ in ()).throw(AssertionError()),
+            lease_token_factory=lambda: RECLAIMED_TOKEN,
+            at_minute=16,
+        ).propose(CAPTURE_ID)
+
+        self.assertEqual(result.status, ProposalStatus.FAILED)
+        self.assertEqual(result.reason, "proposal_evidence_failed")
+        self.assertEqual(result.intake_state, "failed")
+        self.assertEqual(raw_path.read_bytes(), before)
+        self.assertEqual(
+            {path.name for path in response_directory.iterdir()},
+            {"raw-response.txt"},
+        )
+        self.assertEqual(adapter.calls, 0)
+        self.assertIsNone(self.state_store.find_proposal_by_capture_id(CAPTURE_ID))
+        self.assertFalse((self.runtime_root / "vault").exists())
+
+    # Mutation caught: calling the provider again when complete response metadata
+    # is recoverable.
+    def test_crash_after_response_metadata_reuses_response_without_provider_call(self):
+        crashing_evidence = ProposalEvidenceCrashStore(
+            self.proposal_evidence_store,
+            self.runtime_root,
+            ProposalEvidenceCrashStore.AFTER_METADATA,
+        )
+        first_adapter = RecoveryAdapter()
+
+        with self.assertRaises(InjectedCrash):
+            self._service(
+                first_adapter,
+                proposal_evidence_store=crashing_evidence,
+            ).propose(CAPTURE_ID)
+
+        response_directory = self.runtime_root / "proposal-evidence" / PROPOSAL_ID
+        before = {
+            path.name: path.read_bytes()
+            for path in response_directory.iterdir()
+        }
+        adapter = RecoveryAdapter(allow_call=False)
+
+        result = self._service(
+            adapter,
+            proposal_evidence_store=ReadOnlyProposalEvidenceStore(
+                self.proposal_evidence_store
+            ),
+            proposal_id_factory=lambda: (_ for _ in ()).throw(AssertionError()),
+            lease_token_factory=lambda: RECLAIMED_TOKEN,
+            at_minute=16,
+        ).propose(CAPTURE_ID)
+
+        self.assertEqual(result.status, ProposalStatus.PROPOSED)
+        self.assertEqual(result.proposal_id, PROPOSAL_ID)
+        self.assertEqual(adapter.calls, 0)
+        self.assertEqual(
+            {path.name: path.read_bytes() for path in response_directory.iterdir()},
+            before,
+        )
+
+    # Mutation caught: requiring another provider call instead of reparsing
+    # canonical response evidence.
+    def test_crash_after_parse_reparses_canonical_response_without_provider_call(self):
+        crashing_content = ProposalContentCrashStore(
+            self.content_store,
+            self.runtime_root,
+            ProposalContentCrashStore.BEFORE_WRITE,
+        )
+        first_adapter = RecoveryAdapter()
+
+        with self.assertRaises(InjectedCrash):
+            self._service(
+                first_adapter,
+                content_store=crashing_content,
+            ).propose(CAPTURE_ID)
+
+        response_path = (
+            self.runtime_root
+            / "proposal-evidence"
+            / PROPOSAL_ID
+            / "raw-response.txt"
+        )
+        response_before = response_path.read_bytes()
+        self.assertFalse(
+            (self.runtime_root / "proposal-content" / PROPOSAL_ID).exists()
+        )
+        adapter = RecoveryAdapter(allow_call=False)
+
+        result = self._service(
+            adapter,
+            proposal_evidence_store=ReadOnlyProposalEvidenceStore(
+                self.proposal_evidence_store
+            ),
+            proposal_id_factory=lambda: (_ for _ in ()).throw(AssertionError()),
+            lease_token_factory=lambda: RECLAIMED_TOKEN,
+            at_minute=16,
+        ).propose(CAPTURE_ID)
+
+        semantic = parse_proposal_response(PROPOSAL_RAW)
+        self.assertEqual(result.status, ProposalStatus.PROPOSED)
+        self.assertEqual(adapter.calls, 0)
+        self.assertEqual(response_path.read_bytes(), response_before)
+        self.assertEqual(
+            (self.runtime_root / result.content_path).read_bytes(),
+            render_proposal_body(semantic),
+        )
+
+    # Mutation caught: repairing or overwriting body-only proposal content on restart.
+    def test_crash_after_content_bytes_preserves_partial_content_and_fails_closed(self):
+        crashing_content = ProposalContentCrashStore(
+            self.content_store,
+            self.runtime_root,
+            ProposalContentCrashStore.AFTER_BODY_BYTES,
+        )
+
+        with self.assertRaises(InjectedCrash):
+            self._service(
+                RecoveryAdapter(),
+                content_store=crashing_content,
+            ).propose(CAPTURE_ID)
+
+        content_directory = self.runtime_root / "proposal-content" / PROPOSAL_ID
+        body_path = content_directory / "body.md"
+        before = body_path.read_bytes()
+        self.assertEqual(
+            before,
+            render_proposal_body(parse_proposal_response(PROPOSAL_RAW)),
+        )
+        self.assertEqual(
+            {path.name for path in content_directory.iterdir()},
+            {"body.md"},
+        )
+        adapter = RecoveryAdapter(allow_call=False)
+
+        result = self._service(
+            adapter,
+            proposal_evidence_store=ReadOnlyProposalEvidenceStore(
+                self.proposal_evidence_store
+            ),
+            content_store=ReadOnlyProposalContentStore(self.content_store),
+            proposal_id_factory=lambda: (_ for _ in ()).throw(AssertionError()),
+            lease_token_factory=lambda: RECLAIMED_TOKEN,
+            at_minute=16,
+        ).propose(CAPTURE_ID)
+
+        self.assertEqual(result.status, ProposalStatus.FAILED)
+        self.assertEqual(result.reason, "proposal_content_failed")
+        self.assertEqual(result.intake_state, "failed")
+        self.assertEqual(body_path.read_bytes(), before)
+        self.assertEqual(
+            {path.name for path in content_directory.iterdir()},
+            {"body.md"},
+        )
+        self.assertEqual(adapter.calls, 0)
+        self.assertIsNone(self.state_store.find_proposal_by_capture_id(CAPTURE_ID))
+        self.assertFalse((self.runtime_root / "vault").exists())
+
+    # Mutation caught: regenerating canonical content when complete metadata is
+    # recoverable.
+    def test_crash_after_content_metadata_revalidates_without_provider_call(self):
+        crashing_content = ProposalContentCrashStore(
+            self.content_store,
+            self.runtime_root,
+            ProposalContentCrashStore.AFTER_METADATA,
+        )
+
+        with self.assertRaises(InjectedCrash):
+            self._service(
+                RecoveryAdapter(),
+                content_store=crashing_content,
+            ).propose(CAPTURE_ID)
+
+        content_directory = self.runtime_root / "proposal-content" / PROPOSAL_ID
+        before = {
+            path.name: path.read_bytes()
+            for path in content_directory.iterdir()
+        }
+        adapter = RecoveryAdapter(allow_call=False)
+
+        result = self._service(
+            adapter,
+            proposal_evidence_store=ReadOnlyProposalEvidenceStore(
+                self.proposal_evidence_store
+            ),
+            content_store=ReadOnlyProposalContentStore(self.content_store),
+            proposal_id_factory=lambda: (_ for _ in ()).throw(AssertionError()),
+            lease_token_factory=lambda: RECLAIMED_TOKEN,
+            at_minute=16,
+        ).propose(CAPTURE_ID)
+
+        self.assertEqual(result.status, ProposalStatus.PROPOSED)
+        self.assertEqual(result.proposal_id, PROPOSAL_ID)
+        self.assertEqual(adapter.calls, 0)
+        self.assertEqual(
+            {path.name: path.read_bytes() for path in content_directory.iterdir()},
+            before,
+        )
+
+    # Mutation caught: repeating provider or artifact stages after proposal commit.
+    def test_crash_after_proposal_transaction_resumes_only_draft_stage(self):
+        crashing_state = CrashAfterStateMutationStore(
+            self.state_store,
+            "complete_proposal",
+        )
+        first_adapter = RecoveryAdapter()
+
+        with self.assertRaises(InjectedCrash):
+            self._service(
+                first_adapter,
+                state_store=crashing_state,
+            ).propose(CAPTURE_ID)
+
+        proposal = self.state_store.find_proposal_by_capture_id(CAPTURE_ID)
+        self.assertIsNotNone(proposal)
+        self.assertIsNone(proposal.draft_note_path)
+        self.assertEqual(
+            self.state_store.find_intake_by_capture_id(CAPTURE_ID).state,
+            "proposed",
+        )
+        self.assertIsNone(
+            self.state_store.find_proposal_reservation_by_capture_id(CAPTURE_ID)
+        )
+        self.assertFalse((self.runtime_root / "vault").exists())
+        adapter = RecoveryAdapter(allow_call=False)
+
+        result = self._service(
+            adapter,
+            proposal_evidence_store=ReadOnlyProposalEvidenceStore(
+                self.proposal_evidence_store
+            ),
+            content_store=ReadOnlyProposalContentStore(self.content_store),
+            at_minute=1,
+        ).propose(CAPTURE_ID)
+
+        self.assertEqual(result.status, ProposalStatus.PROPOSED)
+        self.assertEqual(result.intake_state, "awaiting_approval")
+        self.assertEqual(adapter.calls, 0)
+        self.assertEqual(table_row_count(self.state_store, "proposal"), 1)
+
+    # Mutation caught: repairing an empty exclusively created draft during restart.
+    def test_crash_after_exclusive_draft_create_preserves_empty_file_and_fails_closed(
+        self,
+    ):
+        crashing_draft = DraftCrashStore(
+            self.draft_store,
+            self.runtime_root,
+            DraftCrashStore.AFTER_EXCLUSIVE_CREATE,
+        )
+
+        with self.assertRaises(InjectedCrash):
+            self._service(
+                RecoveryAdapter(),
+                draft_store=crashing_draft,
+            ).propose(CAPTURE_ID)
+
+        draft_path = self.runtime_root / f"vault/notes/proposed/note.{CAPTURE_ID}.md"
+        self.assertTrue(draft_path.is_file())
+        self.assertEqual(draft_path.read_bytes(), b"")
+        adapter = RecoveryAdapter(allow_call=False)
+
+        result = self._service(
+            adapter,
+            draft_store=ReadOnlyDraftStore(self.draft_store),
+            at_minute=1,
+        ).propose(CAPTURE_ID)
+
+        self.assertEqual(result.status, ProposalStatus.FAILED)
+        self.assertEqual(result.reason, "draft_collision")
+        self.assertEqual(result.intake_state, "failed")
+        self.assertEqual(draft_path.read_bytes(), b"")
+        self.assertEqual(adapter.calls, 0)
+        proposal = self.state_store.find_proposal_by_capture_id(CAPTURE_ID)
+        self.assertIsNone(proposal.draft_note_path)
+
+    # Mutation caught: rewriting an exact closed draft instead of validating and
+    # registering it.
+    def test_crash_after_exact_draft_close_registers_without_rewrite(self):
+        crashing_draft = DraftCrashStore(
+            self.draft_store,
+            self.runtime_root,
+            DraftCrashStore.AFTER_EXACT_CLOSE,
+        )
+
+        with self.assertRaises(InjectedCrash):
+            self._service(
+                RecoveryAdapter(),
+                draft_store=crashing_draft,
+            ).propose(CAPTURE_ID)
+
+        draft_path = self.runtime_root / f"vault/notes/proposed/note.{CAPTURE_ID}.md"
+        before = draft_path.read_bytes()
+        self.assertTrue(before)
+        adapter = RecoveryAdapter(allow_call=False)
+
+        result = self._service(
+            adapter,
+            draft_store=ReadOnlyDraftStore(self.draft_store),
+            at_minute=1,
+        ).propose(CAPTURE_ID)
+
+        self.assertEqual(result.status, ProposalStatus.PROPOSED)
+        self.assertEqual(result.intake_state, "awaiting_approval")
+        self.assertEqual(draft_path.read_bytes(), before)
+        self.assertEqual(adapter.calls, 0)
+        proposal = self.state_store.find_proposal_by_capture_id(CAPTURE_ID)
+        self.assertEqual(proposal.draft_note_path, result.draft_path)
+
+    # Mutation caught: rewriting an exact validated draft instead of registering it.
+    def test_crash_after_draft_validation_registers_without_rewrite(self):
+        crashing_draft = DraftCrashStore(
+            self.draft_store,
+            self.runtime_root,
+            DraftCrashStore.AFTER_VALIDATION,
+        )
+
+        with self.assertRaises(InjectedCrash):
+            self._service(
+                RecoveryAdapter(),
+                draft_store=crashing_draft,
+            ).propose(CAPTURE_ID)
+
+        draft_path = self.runtime_root / f"vault/notes/proposed/note.{CAPTURE_ID}.md"
+        before = draft_path.read_bytes()
+        adapter = RecoveryAdapter(allow_call=False)
+
+        result = self._service(
+            adapter,
+            draft_store=ReadOnlyDraftStore(self.draft_store),
+            at_minute=1,
+        ).propose(CAPTURE_ID)
+
+        self.assertEqual(result.status, ProposalStatus.PROPOSED)
+        self.assertEqual(result.intake_state, "awaiting_approval")
+        self.assertEqual(draft_path.read_bytes(), before)
+        self.assertEqual(adapter.calls, 0)
+        proposal = self.state_store.find_proposal_by_capture_id(CAPTURE_ID)
+        self.assertEqual(proposal.draft_note_path, result.draft_path)
+
+    # Mutation caught: treating a committed draft registration as new work on restart.
+    def test_crash_after_draft_registration_returns_duplicate_on_restart(self):
+        crashing_state = CrashAfterStateMutationStore(
+            self.state_store,
+            "register_proposal_draft",
+        )
+
+        with self.assertRaises(InjectedCrash):
+            self._service(
+                RecoveryAdapter(),
+                state_store=crashing_state,
+            ).propose(CAPTURE_ID)
+
+        proposal = self.state_store.find_proposal_by_capture_id(CAPTURE_ID)
+        draft_path = self.runtime_root / proposal.draft_note_path
+        before = draft_path.read_bytes()
+        self.assertEqual(
+            self.state_store.find_intake_by_capture_id(CAPTURE_ID).state,
+            "awaiting_approval",
+        )
+        adapter = RecoveryAdapter(allow_call=False)
+
+        result = self._service(
+            adapter,
+            draft_store=ReadOnlyDraftStore(self.draft_store),
+            at_minute=1,
+        ).propose(CAPTURE_ID)
+
+        self.assertEqual(result.status, ProposalStatus.DUPLICATE)
+        self.assertEqual(result.proposal_id, PROPOSAL_ID)
+        self.assertEqual(result.intake_state, "awaiting_approval")
+        self.assertEqual(draft_path.read_bytes(), before)
+        self.assertEqual(adapter.calls, 0)
+        self.assertEqual(table_row_count(self.state_store, "proposal"), 1)
 
     def test_exact_replay_returns_duplicate_without_model_or_second_artifact(self):
         first_adapter = RecoveryAdapter()
