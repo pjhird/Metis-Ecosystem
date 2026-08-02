@@ -204,6 +204,23 @@ class ClassificationServiceTests(unittest.TestCase):
         values.update(changes)
         return ClassificationRecord(**values)
 
+    def _prepare_valid_replay(self):
+        response = self.response_store.create(
+            CLASSIFICATION_ID,
+            CAPTURE_ID,
+            RAW_RESPONSE,
+            "test-model",
+            "classify-v1",
+            RECEIVED_AT,
+        )
+        self.state_store.intake = replace(
+            self.intake,
+            state="classified",
+            state_updated_at=RECEIVED_AT,
+        )
+        self.state_store.classification = self._classification_record()
+        return response
+
     def _fail_if_called(self):
         self.fail("factory must not be called")
 
@@ -261,23 +278,10 @@ class ClassificationServiceTests(unittest.TestCase):
         self.assertIn('"Plan the café launch.\\n', self.adapter.prompts[0])
 
     def test_matching_classified_record_returns_duplicate_without_model_call(self) -> None:
-        response = self.response_store.create(
-            CLASSIFICATION_ID,
-            CAPTURE_ID,
-            RAW_RESPONSE,
-            "test-model",
-            "classify-v1",
-            RECEIVED_AT,
-        )
+        response = self._prepare_valid_replay()
         before = {
             path.name: path.read_bytes() for path in response.directory.iterdir()
         }
-        self.state_store.intake = replace(
-            self.intake,
-            state="classified",
-            state_updated_at=RECEIVED_AT,
-        )
-        self.state_store.classification = self._classification_record()
 
         result = self._service(id_factory=self._fail_if_called).classify(CAPTURE_ID)
 
@@ -292,6 +296,40 @@ class ClassificationServiceTests(unittest.TestCase):
             {path.name: path.read_bytes() for path in response.directory.iterdir()},
             before,
         )
+
+    def test_replay_refuses_duplicate_when_source_evidence_is_missing(self) -> None:
+        self._prepare_valid_replay()
+        self.capture_evidence.raw_path.unlink()
+
+        result = self._service(id_factory=self._fail_if_called).classify(CAPTURE_ID)
+
+        self.assertEqual(result.status, ClassificationStatus.FAILED)
+        self.assertEqual(result.reason, "classification_consistency_failed")
+        self.assertEqual(self.adapter.prompts, [])
+        self.assertEqual(self.state_store.calls, ["find_intake", "find_classification"])
+
+    def test_replay_refuses_duplicate_when_source_evidence_is_corrupt(self) -> None:
+        self._prepare_valid_replay()
+        self.capture_evidence.raw_path.write_bytes(b"corrupt source")
+
+        result = self._service(id_factory=self._fail_if_called).classify(CAPTURE_ID)
+
+        self.assertEqual(result.status, ClassificationStatus.FAILED)
+        self.assertEqual(result.reason, "classification_consistency_failed")
+        self.assertEqual(self.adapter.prompts, [])
+
+    def test_replay_refuses_duplicate_when_source_row_disagrees(self) -> None:
+        self._prepare_valid_replay()
+        self.state_store.intake = replace(
+            self.state_store.intake,
+            content_hash="sha256:" + "b" * 64,
+        )
+
+        result = self._service(id_factory=self._fail_if_called).classify(CAPTURE_ID)
+
+        self.assertEqual(result.status, ClassificationStatus.FAILED)
+        self.assertEqual(result.reason, "classification_consistency_failed")
+        self.assertEqual(self.adapter.prompts, [])
 
     def test_missing_capture_refuses_before_evidence_or_model_access(self) -> None:
         store = FakeStateStore(None, self.response_store, self.runtime_root)
@@ -349,6 +387,30 @@ class ClassificationServiceTests(unittest.TestCase):
                 result = self._service(
                     state_store=store,
                     evidence_store=evidence_store,
+                    id_factory=self._fail_if_called,
+                ).classify(CAPTURE_ID)
+
+                self.assertEqual(result.status, ClassificationStatus.FAILED)
+                self.assertEqual(result.reason, "classification_consistency_failed")
+                self.assertNotIn("begin", store.calls)
+
+        self.assertEqual(self.adapter.prompts, [])
+
+    def test_captured_state_invariants_must_agree_before_transition(self) -> None:
+        cases = (
+            {"failure_reason": "capture.previous"},
+            {"state_updated_at": "2026-08-01T19:30:00Z"},
+        )
+        for changes in cases:
+            with self.subTest(changes=changes):
+                store = FakeStateStore(
+                    replace(self.intake, **changes),
+                    self.response_store,
+                    self.runtime_root,
+                )
+
+                result = self._service(
+                    state_store=store,
                     id_factory=self._fail_if_called,
                 ).classify(CAPTURE_ID)
 
@@ -590,6 +652,25 @@ class ClassificationServiceTests(unittest.TestCase):
         )
         self._assert_capture_unchanged(before)
 
+    def test_duplicate_json_keys_are_preserved_and_rejected(self) -> None:
+        before = self._capture_snapshot()
+        duplicate_keys = (
+            '{"candidate_type":"idea","candidate_type":"task",'
+            '"sensitivity":"normal","confidence":0.5}'
+        )
+        self.adapter.response = ModelResponse("test-model", duplicate_keys)
+
+        result = self._service().classify(CAPTURE_ID)
+
+        self.assertEqual(result.status, ClassificationStatus.FAILED)
+        self.assertEqual(result.reason, "model_response_invalid")
+        self.assertEqual(
+            (self.runtime_root / result.raw_response_path).read_bytes(),
+            duplicate_keys.encode("utf-8"),
+        )
+        self.assertEqual(self.state_store.intake.state, "failed")
+        self._assert_capture_unchanged(before)
+
     def test_extra_or_missing_keys_are_rejected(self) -> None:
         cases = (
             '{"candidate_type":"idea","sensitivity":"normal"}',
@@ -686,6 +767,30 @@ class ClassificationServiceTests(unittest.TestCase):
                     },
                     before,
                 )
+
+    def test_huge_integer_confidence_is_preserved_and_recorded_failed(self) -> None:
+        before = self._capture_snapshot()
+        raw_text = (
+            '{"candidate_type":"idea","sensitivity":"normal","confidence":'
+            + str(10**400)
+            + "}"
+        )
+        self.adapter.response = ModelResponse("test-model", raw_text)
+
+        result = self._service().classify(CAPTURE_ID)
+
+        self.assertEqual(result.status, ClassificationStatus.FAILED)
+        self.assertEqual(result.reason, "model_response_invalid")
+        self.assertEqual(
+            (self.runtime_root / result.raw_response_path).read_bytes(),
+            raw_text.encode("utf-8"),
+        )
+        self.assertEqual(self.state_store.intake.state, "failed")
+        self.assertEqual(
+            self.state_store.intake.failure_reason,
+            "classification.model_response_invalid",
+        )
+        self._assert_capture_unchanged(before)
 
     def test_response_evidence_failure_never_persists_classification(self) -> None:
         before = self._capture_snapshot()

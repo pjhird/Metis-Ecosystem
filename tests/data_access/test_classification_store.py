@@ -86,7 +86,7 @@ class ClassificationStoreTests(unittest.TestCase):
         )
 
     def test_begin_classification_updates_captured_intake(self) -> None:
-        self._register(failure_reason="capture.previous")
+        self._register()
 
         result = self.store.begin_classification(CAPTURE_ID, STARTED_AT)
 
@@ -94,6 +94,31 @@ class ClassificationStoreTests(unittest.TestCase):
         self.assertEqual(result.state_updated_at, STARTED_AT)
         self.assertIsNone(result.failure_reason)
         self.assertEqual(self.store.find_intake_by_capture_id(CAPTURE_ID), result)
+
+    def test_begin_classification_refuses_inconsistent_captured_intake(self) -> None:
+        cases = (
+            {"failure_reason": "capture.previous"},
+            {"state_updated_at": "2026-08-01T19:30:00Z"},
+        )
+        for index, changes in enumerate(cases):
+            with self.subTest(changes=changes):
+                capture_id = f"8f14e45f-ea3c-4f7a-9f2d-{index + 100:012d}"
+                original = self._register(
+                    capture_id=capture_id,
+                    content_hash=f"sha256:{index + 100:064x}",
+                    evidence_path=f"evidence/{capture_id}",
+                    trace_id=capture_id,
+                    **changes,
+                )
+
+                with self.assertRaises(StateTransitionRefused) as raised:
+                    self.store.begin_classification(capture_id, STARTED_AT)
+
+                self.assertEqual(raised.exception.record, original)
+                self.assertEqual(
+                    self.store.find_intake_by_capture_id(capture_id),
+                    original,
+                )
 
     def test_begin_classification_retries_only_classification_failure(self) -> None:
         self._register(

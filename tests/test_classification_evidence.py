@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from metis.classification_evidence import (
     ClassificationEvidenceCollision,
@@ -81,6 +82,59 @@ class ClassificationEvidenceStoreTests(unittest.TestCase):
             before,
         )
 
+    def test_raw_file_collision_after_directory_creation_is_write_failure(
+        self,
+    ) -> None:
+        directory = (
+            self.runtime_root / "classification-evidence" / CLASSIFICATION_ID
+        )
+        raw_path = directory / "raw-response.txt"
+        original_mkdir = Path.mkdir
+
+        def mkdir_then_create_raw(path: Path, *args: object, **kwargs: object) -> None:
+            original_mkdir(path, *args, **kwargs)
+            if path == directory:
+                raw_path.write_bytes(b"raced response evidence")
+
+        with patch.object(Path, "mkdir", new=mkdir_then_create_raw):
+            with self.assertRaises(ClassificationEvidenceWriteError) as raised:
+                self._create()
+
+        self.assertEqual(
+            raised.exception.evidence_path,
+            f"classification-evidence/{CLASSIFICATION_ID}",
+        )
+        self.assertEqual(raw_path.read_bytes(), b"raced response evidence")
+        self.assertFalse((directory / "meta.json").exists())
+
+    def test_metadata_file_collision_after_raw_write_is_write_failure(self) -> None:
+        directory = (
+            self.runtime_root / "classification-evidence" / CLASSIFICATION_ID
+        )
+        raw_path = directory / "raw-response.txt"
+        meta_path = directory / "meta.json"
+        original_open = Path.open
+
+        def open_with_meta_collision(
+            path: Path, *args: object, **kwargs: object
+        ) -> object:
+            mode = args[0] if args else kwargs.get("mode", "r")
+            if path == meta_path and mode == "x" and not meta_path.exists():
+                with original_open(meta_path, "w", encoding="utf-8") as stream:
+                    stream.write("raced metadata")
+            return original_open(path, *args, **kwargs)
+
+        with patch.object(Path, "open", new=open_with_meta_collision):
+            with self.assertRaises(ClassificationEvidenceWriteError) as raised:
+                self._create()
+
+        self.assertEqual(
+            raised.exception.evidence_path,
+            f"classification-evidence/{CLASSIFICATION_ID}",
+        )
+        self.assertEqual(raw_path.read_bytes(), RAW_TEXT.encode("utf-8"))
+        self.assertEqual(meta_path.read_text(encoding="utf-8"), "raced metadata")
+
     def test_partial_directory_fails_closed(self) -> None:
         directory = self.runtime_root / "classification-evidence" / CLASSIFICATION_ID
         directory.mkdir(parents=True)
@@ -95,6 +149,38 @@ class ClassificationEvidenceStoreTests(unittest.TestCase):
 
         with self.assertRaises(ClassificationEvidenceConsistencyError):
             self.store.validate_directory(record.directory)
+
+    def test_validation_rejects_non_regular_response_evidence_files(self) -> None:
+        cases = (
+            ("raw-response.txt", "directory"),
+            ("meta.json", "directory"),
+            ("raw-response.txt", "symlink"),
+            ("meta.json", "symlink"),
+        )
+        for index, (name, replacement) in enumerate(cases):
+            with self.subTest(name=name, replacement=replacement):
+                root = self.runtime_root / f"file-shape-{index}"
+                store = ClassificationEvidenceStore(root)
+                record = store.create(
+                    CLASSIFICATION_ID,
+                    CAPTURE_ID,
+                    RAW_TEXT,
+                    MODEL_ID,
+                    PROMPT_VERSION,
+                    RECEIVED_AT,
+                )
+                path = record.directory / name
+                path.unlink()
+                if replacement == "directory":
+                    path.mkdir()
+                else:
+                    target_name = (
+                        "meta.json" if name == "raw-response.txt" else "raw-response.txt"
+                    )
+                    path.symlink_to(record.directory / target_name)
+
+                with self.assertRaises(ClassificationEvidenceConsistencyError):
+                    store.validate_directory(record.directory)
 
     def test_detectable_metadata_or_raw_disagreement_fails_closed(self) -> None:
         for field, value in (

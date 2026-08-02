@@ -203,7 +203,11 @@ class SQLiteStateStore:
                     f"classification start failed: intake not found: {capture_id}"
                 )
             current = _intake_record(row)
-            eligible = current.state == "captured" or (
+            eligible = (
+                current.state == "captured"
+                and current.failure_reason is None
+                and current.state_updated_at == current.captured_at
+            ) or (
                 current.state == "failed"
                 and current.failure_reason is not None
                 and current.failure_reason.startswith("classification.")
@@ -218,12 +222,13 @@ class SQLiteStateStore:
             cursor = connection.execute(
                 "UPDATE intake SET state = 'classifying', state_updated_at = ?, "
                 "failure_reason = NULL WHERE capture_id = ? AND state = ? "
-                "AND failure_reason IS ?",
+                "AND failure_reason IS ? AND state_updated_at = ?",
                 (
                     started_at,
                     capture_id,
                     current.state,
                     current.failure_reason,
+                    current.state_updated_at,
                 ),
             )
             if cursor.rowcount != 1:

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -22,7 +21,7 @@ from .data_access import (
     StateStoreError,
     StateTransitionRefused,
 )
-from .evidence import EvidenceConsistencyError, EvidenceStore
+from .evidence import EvidenceConsistencyError, EvidenceRecord, EvidenceStore
 from .identifiers import is_ulid, new_ulid
 from .model_adapters import (
     ModelAdapter,
@@ -127,6 +126,8 @@ class ClassificationService:
         if existing is not None or intake.state == "classified":
             if existing is None or intake.state != "classified":
                 return self._consistency_failure(capture_id)
+            if self._validated_source(intake) is None:
+                return self._consistency_failure(capture_id)
             return self._replay(intake, existing)
 
         if intake.state == "classifying":
@@ -141,6 +142,11 @@ class ClassificationService:
             and intake.failure_reason is not None
             and intake.failure_reason.startswith("classification.")
         )
+        if intake.state == "captured" and (
+            intake.failure_reason is not None
+            or intake.state_updated_at != intake.captured_at
+        ):
+            return self._consistency_failure(capture_id)
         if intake.state != "captured" and not eligible_retry:
             return self._result(
                 ClassificationStatus.REFUSED,
@@ -149,20 +155,8 @@ class ClassificationService:
                 message=f"classification is not allowed from state {intake.state}",
             )
 
-        if (
-            intake.source_type != "cli-typed"
-            or intake.evidence_path != f"evidence/{capture_id}"
-            or intake.trace_id != capture_id
-        ):
-            return self._consistency_failure(capture_id)
-
-        try:
-            evidence = self._evidence_store.validate_directory(
-                self._runtime_root / intake.evidence_path
-            )
-        except EvidenceConsistencyError:
-            return self._consistency_failure(capture_id)
-        if not self._row_matches_evidence(intake, evidence):
+        evidence = self._validated_source(intake)
+        if evidence is None:
             return self._consistency_failure(capture_id)
 
         classification_id = self._id_factory()
@@ -350,7 +344,6 @@ class ClassificationService:
             or not isinstance(record.sensitivity, str)
             or record.sensitivity not in SENSITIVITIES
             or type(record.confidence) not in (int, float)
-            or not math.isfinite(record.confidence)
             or not 0 <= record.confidence <= 1
             or record.routing != ROUTING[record.candidate_type]
             or record.prompt_version != PROMPT_VERSION
@@ -489,7 +482,17 @@ class ClassificationService:
         )
 
     def _parse_response(self, raw_text: str) -> tuple[str, str, float]:
-        payload = json.loads(raw_text)
+        def reject_duplicate_keys(
+            pairs: list[tuple[str, object]],
+        ) -> dict[str, object]:
+            payload: dict[str, object] = {}
+            for key, value in pairs:
+                if key in payload:
+                    raise ValueError("model response keys are duplicated")
+                payload[key] = value
+            return payload
+
+        payload = json.loads(raw_text, object_pairs_hook=reject_duplicate_keys)
         if type(payload) is not dict or set(payload) != RESPONSE_KEYS:
             raise ValueError("model response keys are invalid")
         candidate_type = payload["candidate_type"]
@@ -501,7 +504,6 @@ class ClassificationService:
             raise ValueError("sensitivity is invalid")
         if (
             type(confidence) not in (int, float)
-            or not math.isfinite(confidence)
             or not 0 <= confidence <= 1
         ):
             raise ValueError("confidence is invalid")
@@ -516,6 +518,21 @@ class ClassificationService:
             and intake.evidence_path == evidence.evidence_path
             and intake.trace_id == intake.capture_id
         )
+
+    def _validated_source(self, intake) -> Optional[EvidenceRecord]:
+        if (
+            intake.source_type != "cli-typed"
+            or intake.evidence_path != f"evidence/{intake.capture_id}"
+            or intake.trace_id != intake.capture_id
+        ):
+            return None
+        try:
+            evidence = self._evidence_store.validate_directory(
+                self._runtime_root / intake.evidence_path
+            )
+        except EvidenceConsistencyError:
+            return None
+        return evidence if self._row_matches_evidence(intake, evidence) else None
 
     def _timestamp(self) -> str:
         return (
