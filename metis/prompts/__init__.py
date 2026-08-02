@@ -1,0 +1,14 @@
+"""Versioned prompts packaged with Metis."""
+
+from importlib.resources import files
+
+
+PROMPT_VERSION = "classify-v1"
+
+
+def load_classification_prompt() -> str:
+    return (
+        files("metis.prompts")
+        .joinpath(f"{PROMPT_VERSION}.txt")
+        .read_text(encoding="utf-8")
+    )
