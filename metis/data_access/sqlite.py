@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -75,6 +76,53 @@ PROPOSAL_RESERVATION_COLUMNS = (
     "reserved_at",
     "lease_expires_at",
 )
+RESERVATION_FAILURE_REASONS = frozenset(
+    {
+        "proposal.proposal_consistency_failed",
+        "proposal.model_configuration_failed",
+        "proposal.model_request_failed",
+        "proposal.model_response_refused",
+        "proposal.model_response_truncated",
+        "proposal.model_response_invalid",
+        "proposal.proposal_evidence_failed",
+        "proposal.proposal_content_failed",
+        "proposal.proposal_persistence_failed",
+    }
+)
+DRAFT_FAILURE_REASONS = frozenset(
+    {
+        "proposal.draft_write_failed",
+        "proposal.draft_collision",
+        "proposal.proposal_persistence_failed",
+    }
+)
+
+
+def _parse_utc_timestamp(value: str) -> datetime:
+    if not isinstance(value, str):
+        raise ValueError("timestamp is not a string")
+    parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    if parsed.strftime("%Y-%m-%dT%H:%M:%SZ") != value:
+        raise ValueError("timestamp is not canonical UTC")
+    return parsed
+
+
+def _has_full_proposal_lease(reservation: ProposalReservationRecord) -> bool:
+    try:
+        return (
+            _parse_utc_timestamp(reservation.lease_expires_at)
+            - _parse_utc_timestamp(reservation.reserved_at)
+            == timedelta(minutes=15)
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def _timestamp_not_before(value: str, minimum: str) -> bool:
+    try:
+        return _parse_utc_timestamp(value) >= _parse_utc_timestamp(minimum)
+    except (TypeError, ValueError):
+        return False
 
 
 def _intake_record(row: tuple) -> IntakeRecord:
@@ -435,6 +483,8 @@ class SQLiteStateStore:
         reservation: ProposalReservationRecord,
     ) -> ProposalReservationRecord:
         """Reserve a classified intake and enter proposing atomically."""
+        if not _has_full_proposal_lease(reservation):
+            raise StateStoreError("proposal reservation lease is invalid")
         connection = self._proposal_connection("proposal start")
         try:
             connection.execute("BEGIN IMMEDIATE")
@@ -513,6 +563,11 @@ class SQLiteStateStore:
             or expected.lease_token == replacement.lease_token
         ):
             raise StateStoreError("proposal reclaim identities are inconsistent")
+        if (
+            replacement.reserved_at != reclaimed_at
+            or not _has_full_proposal_lease(replacement)
+        ):
+            raise StateStoreError("proposal reclaim lease is invalid")
         connection = self._proposal_connection("proposal reclaim")
         try:
             connection.execute("BEGIN IMMEDIATE")
@@ -524,13 +579,27 @@ class SQLiteStateStore:
             reservation = (
                 None if row is None else _proposal_reservation_record(row)
             )
-            retryable_state = current.state == "proposing" or (
+            proposal = self._select_proposal_by_capture_id(
+                connection,
+                expected.capture_id,
+            )
+            retryable_state = (
+                current.state == "proposing"
+                and current.failure_reason is None
+                and current.state_updated_at == expected.reserved_at
+                and _has_full_proposal_lease(expected)
+            ) or (
                 current.state == "failed"
-                and current.failure_reason is not None
-                and current.failure_reason.startswith("proposal.")
+                and current.failure_reason in RESERVATION_FAILURE_REASONS
+                and current.state_updated_at == expected.lease_expires_at
+                and _timestamp_not_before(
+                    expected.lease_expires_at,
+                    expected.reserved_at,
+                )
             )
             if (
                 reservation != expected
+                or proposal is not None
                 or not retryable_state
                 or expected.lease_expires_at > reclaimed_at
             ):
@@ -599,7 +668,7 @@ class SQLiteStateStore:
         failed_at: str,
     ) -> IntakeRecord:
         """Fail a proposing intake while retaining an expired reservation."""
-        if not reason.startswith("proposal."):
+        if reason not in RESERVATION_FAILURE_REASONS:
             raise StateStoreError("proposal failure reason is outside its namespace")
         connection = self._proposal_connection("proposal failure recording")
         try:
@@ -614,10 +683,16 @@ class SQLiteStateStore:
                 if reservation_row is None
                 else _proposal_reservation_record(reservation_row)
             )
+            proposal = self._select_proposal_by_capture_id(connection, capture_id)
             if (
                 current.state != "proposing"
+                or current.failure_reason is not None
                 or reservation is None
                 or reservation.lease_token != lease_token
+                or current.state_updated_at != reservation.reserved_at
+                or not _has_full_proposal_lease(reservation)
+                or not _timestamp_not_before(failed_at, reservation.reserved_at)
+                or proposal is not None
             ):
                 connection.rollback()
                 raise StateTransitionRefused(
@@ -638,8 +713,8 @@ class SQLiteStateStore:
             cursor = connection.execute(
                 "UPDATE intake SET state = 'failed', state_updated_at = ?, "
                 "failure_reason = ? WHERE capture_id = ? AND state = 'proposing' "
-                "AND state_updated_at = ?",
-                (failed_at, reason, capture_id, current.state_updated_at),
+                "AND failure_reason IS NULL AND state_updated_at = ?",
+                (failed_at, reason, capture_id, reservation.reserved_at),
             )
             if cursor.rowcount != 1:
                 connection.rollback()
@@ -687,6 +762,8 @@ class SQLiteStateStore:
                 or reservation.proposal_id != record.proposal_id
                 or reservation.classification_id != record.classification_id
                 or reservation.lease_token != lease_token
+                or current.state_updated_at != reservation.reserved_at
+                or not _has_full_proposal_lease(reservation)
             ):
                 connection.rollback()
                 raise StateTransitionRefused(
@@ -716,8 +793,8 @@ class SQLiteStateStore:
             cursor = connection.execute(
                 "UPDATE intake SET state = 'proposed', state_updated_at = ?, "
                 "failure_reason = NULL WHERE capture_id = ? AND state = 'proposing' "
-                "AND state_updated_at = ?",
-                (record.created_at, record.capture_id, current.state_updated_at),
+                "AND failure_reason IS NULL AND state_updated_at = ?",
+                (record.created_at, record.capture_id, reservation.reserved_at),
             )
             if cursor.rowcount != 1:
                 connection.rollback()
@@ -744,7 +821,7 @@ class SQLiteStateStore:
         failed_at: str,
     ) -> IntakeRecord:
         """Fail an intake after its proposal row was safely persisted."""
-        if not reason.startswith("proposal."):
+        if reason not in DRAFT_FAILURE_REASONS:
             raise StateStoreError("draft failure reason is outside proposal namespace")
         connection = self._proposal_connection("draft failure recording")
         try:
@@ -752,12 +829,15 @@ class SQLiteStateStore:
             current = self._required_intake(connection, capture_id)
             proposal_row = self._select_proposal_by_capture_id(connection, capture_id)
             proposal = None if proposal_row is None else _proposal_record(proposal_row)
+            reservation = self._select_reservation_by_capture_id(connection, capture_id)
             if (
                 current.state != "proposed"
                 or current.failure_reason is not None
                 or proposal is None
                 or proposal.proposal_id != proposal_id
                 or proposal.draft_note_path is not None
+                or proposal.state != "pending"
+                or reservation is not None
             ):
                 connection.rollback()
                 raise StateTransitionRefused(
@@ -767,7 +847,7 @@ class SQLiteStateStore:
             cursor = connection.execute(
                 "UPDATE intake SET state = 'failed', state_updated_at = ?, "
                 "failure_reason = ? WHERE capture_id = ? AND state = 'proposed' "
-                "AND state_updated_at = ?",
+                "AND failure_reason IS NULL AND state_updated_at = ?",
                 (failed_at, reason, capture_id, current.state_updated_at),
             )
             if cursor.rowcount != 1:
@@ -806,11 +886,11 @@ class SQLiteStateStore:
             reservation = self._select_reservation_by_capture_id(connection, capture_id)
             if (
                 current.state != "failed"
-                or current.failure_reason is None
-                or not current.failure_reason.startswith("proposal.")
+                or current.failure_reason not in DRAFT_FAILURE_REASONS
                 or proposal is None
                 or proposal.proposal_id != proposal_id
                 or proposal.draft_note_path is not None
+                or proposal.state != "pending"
                 or reservation is not None
             ):
                 connection.rollback()
@@ -861,12 +941,15 @@ class SQLiteStateStore:
             current = self._required_intake(connection, capture_id)
             proposal_row = self._select_proposal_by_capture_id(connection, capture_id)
             proposal = None if proposal_row is None else _proposal_record(proposal_row)
+            reservation = self._select_reservation_by_capture_id(connection, capture_id)
             if (
                 current.state != "proposed"
                 or current.failure_reason is not None
                 or proposal is None
                 or proposal.proposal_id != proposal_id
                 or proposal.draft_note_path is not None
+                or proposal.state != "pending"
+                or reservation is not None
             ):
                 connection.rollback()
                 raise StateTransitionRefused(
@@ -887,7 +970,7 @@ class SQLiteStateStore:
             cursor = connection.execute(
                 "UPDATE intake SET state = 'awaiting_approval', state_updated_at = ?, "
                 "failure_reason = NULL WHERE capture_id = ? AND state = 'proposed' "
-                "AND state_updated_at = ?",
+                "AND failure_reason IS NULL AND state_updated_at = ?",
                 (registered_at, capture_id, current.state_updated_at),
             )
             if cursor.rowcount != 1:

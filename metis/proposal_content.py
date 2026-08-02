@@ -23,6 +23,15 @@ METADATA_KEYS = {
 }
 
 
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("proposal content metadata key is duplicated")
+        result[key] = value
+    return result
+
+
 @dataclass(frozen=True)
 class ProposalContentRecord:
     proposal_id: str
@@ -142,7 +151,8 @@ class ProposalContentStore:
             ):
                 raise ValueError("proposal content contains a non-regular file")
             metadata = json.loads(
-                children["meta.json"].read_text(encoding="utf-8")
+                children["meta.json"].read_text(encoding="utf-8"),
+                object_pairs_hook=_unique_json_object,
             )
             if not isinstance(metadata, dict) or set(metadata) != METADATA_KEYS:
                 raise ValueError("proposal content metadata keys are invalid")

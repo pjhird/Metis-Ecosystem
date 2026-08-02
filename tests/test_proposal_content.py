@@ -66,6 +66,18 @@ class ProposalContentStoreTests(unittest.TestCase):
 
         self.assertEqual(self.store.validate_directory(expected.directory), expected)
 
+    def test_duplicate_proposal_content_metadata_key_fails_closed(self) -> None:
+        record = self._create()
+        metadata = record.meta_path.read_text(encoding="utf-8").rstrip()
+        record.meta_path.write_text(
+            metadata[:-1]
+            + f',\n  "proposal_id": "{PROPOSAL_ID}"\n}}\n',
+            encoding="utf-8",
+        )
+
+        with self.assertRaises(ProposalContentConsistencyError):
+            self.store.validate_directory(record.directory)
+
     def test_create_refuses_symlinked_store_root(self) -> None:
         outside = self.runtime_root / "outside"
         outside.mkdir()

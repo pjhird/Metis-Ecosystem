@@ -11,10 +11,12 @@ from metis.classification_evidence import ClassificationEvidenceStore
 from metis.data_access import (
     ClassificationRecord,
     IntakeRecord,
+    ProposalReservationRecord,
     SQLiteStateStore,
     StateStoreError,
 )
 from metis.draft_notes import (
+    DraftNoteCollision,
     DraftNoteStore,
     DraftNoteWriteError,
     DraftStatus,
@@ -34,16 +36,20 @@ from metis.proposal_content import (
     ProposalContentCollision,
     ProposalContentStore,
 )
+from metis.proposal_contract import parse_proposal_response, render_proposal_body
 from metis.proposal_evidence import (
     ProposalEvidenceCollision,
     ProposalEvidenceStore,
 )
+from tests.data_access.inspection import force_intake_state
 
 
 CAPTURE_ID = "8f14e45f-ea3c-4f7a-9f2d-6c8b5a1d3e70"
 CLASSIFICATION_ID = "01K1D5Q5M00000000000000000"
 PROPOSAL_ID = "01K1D5Q5M00000000000000001"
+WINNER_PROPOSAL_ID = "01K1D5Q5M00000000000000002"
 LEASE_TOKEN = "f52c0470-93d3-4a47-a864-9e504cf1bfcd"
+WINNER_LEASE_TOKEN = "33aac55e-292a-4f1a-9e85-76450e820d71"
 CAPTURED_AT = "2026-08-02T19:00:00Z"
 CLASSIFIED_AT = "2026-08-02T19:01:00Z"
 PROPOSED_AT = "2026-08-02T20:00:00Z"
@@ -107,12 +113,40 @@ class FailingStateStore(StateStoreProxy):
         return super().__getattr__(name)
 
 
+class BeginProposalRaceStore(StateStoreProxy):
+    def __init__(self, store: SQLiteStateStore, establish_winner) -> None:
+        super().__init__(store)
+        self.establish_winner = establish_winner
+        self.raced = False
+
+    def begin_proposal(self, reservation):
+        if not self.raced:
+            self.raced = True
+            self.establish_winner()
+        return self.store.begin_proposal(reservation)
+
+
 class FailingDraftStore:
     def create(self, relative_path, expected_bytes):
         raise DraftNoteWriteError("unsafe filesystem detail", relative_path)
 
     def validate(self, relative_path, expected_bytes):
         raise AssertionError("failed draft must not be validated")
+
+
+class RaceWinningDraftStore:
+    def __init__(self, store: DraftNoteStore) -> None:
+        self.store = store
+
+    def create(self, relative_path, expected_bytes):
+        record = self.store.create(relative_path, expected_bytes)
+        raise DraftNoteCollision(
+            "simulated exclusive-create race",
+            record.draft_path,
+        )
+
+    def validate(self, relative_path, expected_bytes):
+        return self.store.validate(relative_path, expected_bytes)
 
 
 class RaceWinningProposalEvidenceStore:
@@ -289,6 +323,8 @@ class ProposalServiceTests(unittest.TestCase):
         draft_store=None,
         proposal_evidence_store=None,
         content_store=None,
+        proposal_id: str = PROPOSAL_ID,
+        lease_token: str = LEASE_TOKEN,
     ) -> ProposalService:
         return ProposalService(
             self.state_store if state_store is None else state_store,
@@ -303,8 +339,8 @@ class ProposalServiceTests(unittest.TestCase):
             self.draft_store if draft_store is None else draft_store,
             adapter,
             self.runtime_root,
-            id_factory=lambda: PROPOSAL_ID,
-            lease_token_factory=lambda: LEASE_TOKEN,
+            id_factory=lambda: proposal_id,
+            lease_token_factory=lambda: lease_token,
             clock=lambda: datetime(2026, 8, 2, 20, 0, tzinfo=timezone.utc),
         )
 
@@ -358,6 +394,101 @@ class ProposalServiceTests(unittest.TestCase):
             ),
         )
         self.assertEqual(draft.observed_status, DraftStatus.PROPOSED)
+
+    def test_begin_cas_loss_returns_active_winner_identity(self) -> None:
+        self._classified()
+        winner = ProposalReservationRecord(
+            proposal_id=WINNER_PROPOSAL_ID,
+            capture_id=CAPTURE_ID,
+            classification_id=CLASSIFICATION_ID,
+            lease_token=WINNER_LEASE_TOKEN,
+            reserved_at=PROPOSED_AT,
+            lease_expires_at="2026-08-02T20:15:00Z",
+        )
+        racing_store = BeginProposalRaceStore(
+            self.state_store,
+            lambda: self.state_store.begin_proposal(winner),
+        )
+        adapter = InspectingAdapter(self.state_store)
+
+        result = self._service(
+            adapter,
+            state_store=racing_store,
+        ).propose(CAPTURE_ID)
+
+        self.assertEqual(result.status, ProposalStatus.REFUSED)
+        self.assertEqual(result.reason, "proposal_in_progress")
+        self.assertEqual(result.proposal_id, WINNER_PROPOSAL_ID)
+        self.assertEqual(result.intake_state, "proposing")
+        self.assertEqual(adapter.proposal_prompts, [])
+        self.assertEqual(
+            self.state_store.find_proposal_reservation_by_capture_id(CAPTURE_ID),
+            winner,
+        )
+
+    def test_begin_cas_loss_returns_duplicate_for_completed_winner(self) -> None:
+        self._classified()
+        winner_results = []
+
+        def establish_winner() -> None:
+            winner_results.append(
+                self._service(
+                    InspectingAdapter(self.state_store),
+                    proposal_id=WINNER_PROPOSAL_ID,
+                    lease_token=WINNER_LEASE_TOKEN,
+                ).propose(CAPTURE_ID)
+            )
+
+        racing_store = BeginProposalRaceStore(self.state_store, establish_winner)
+        losing_adapter = InspectingAdapter(self.state_store)
+
+        result = self._service(
+            losing_adapter,
+            state_store=racing_store,
+        ).propose(CAPTURE_ID)
+
+        self.assertEqual(winner_results[0].status, ProposalStatus.PROPOSED)
+        self.assertEqual(result.status, ProposalStatus.DUPLICATE)
+        self.assertEqual(result.proposal_id, WINNER_PROPOSAL_ID)
+        self.assertEqual(result.intake_state, "awaiting_approval")
+        self.assertEqual(losing_adapter.proposal_prompts, [])
+
+    def test_begin_cas_loss_with_unproven_winner_is_state_undetermined(self) -> None:
+        self._classified()
+        winner = ProposalReservationRecord(
+            proposal_id=WINNER_PROPOSAL_ID,
+            capture_id=CAPTURE_ID,
+            classification_id=CLASSIFICATION_ID,
+            lease_token=WINNER_LEASE_TOKEN,
+            reserved_at=PROPOSED_AT,
+            lease_expires_at="2026-08-02T20:15:00Z",
+        )
+
+        def establish_corrupt_winner() -> None:
+            self.state_store.begin_proposal(winner)
+            force_intake_state(
+                self.state_store,
+                CAPTURE_ID,
+                state="proposing",
+                state_updated_at=PROPOSED_AT,
+                failure_reason="proposal.model_request_failed",
+            )
+
+        racing_store = BeginProposalRaceStore(
+            self.state_store,
+            establish_corrupt_winner,
+        )
+        adapter = InspectingAdapter(self.state_store)
+
+        result = self._service(
+            adapter,
+            state_store=racing_store,
+        ).propose(CAPTURE_ID)
+
+        self.assertEqual(result.status, ProposalStatus.FAILED)
+        self.assertEqual(result.reason, "proposal_state_undetermined")
+        self.assertIsNone(result.proposal_id)
+        self.assertEqual(adapter.proposal_prompts, [])
 
     def test_classification_owns_type_sensitivity_confidence_and_risk(self) -> None:
         self._classified(
@@ -539,16 +670,36 @@ class ProposalServiceTests(unittest.TestCase):
             "proposal.proposal_content_failed",
         )
 
-    def test_partial_proposal_evidence_is_preserved_and_fails_closed(self) -> None:
+    def test_preexisting_matching_proposal_evidence_fails_before_reservation(self) -> None:
         self._classified()
-        partial = self.runtime_root / "proposal-evidence" / PROPOSAL_ID
-        partial.mkdir(parents=True)
-        (partial / "partial.txt").write_text("preserve", encoding="utf-8")
+        established = self.proposal_evidence_store.create(
+            PROPOSAL_ID,
+            CLASSIFICATION_ID,
+            CAPTURE_ID,
+            PROPOSAL_RAW,
+            "claude-proposal-returned-model",
+            "propose-v1",
+            PROPOSED_AT,
+        )
+        adapter = InspectingAdapter(self.state_store)
 
-        result = self._service(InspectingAdapter(self.state_store)).propose(CAPTURE_ID)
+        result = self._service(adapter).propose(CAPTURE_ID)
 
-        self._assert_recorded_attempt_failure(result, "proposal_evidence_failed")
-        self.assertEqual((partial / "partial.txt").read_text(), "preserve")
+        self.assertEqual(result.status, ProposalStatus.FAILED)
+        self.assertEqual(result.reason, "proposal_consistency_failed")
+        self.assertEqual(adapter.proposal_prompts, [])
+        self.assertEqual(
+            established.raw_path.read_text(encoding="utf-8"),
+            PROPOSAL_RAW,
+        )
+        self.assertEqual(
+            self.state_store.find_intake_by_capture_id(CAPTURE_ID).state,
+            "classified",
+        )
+        self.assertIsNone(
+            self.state_store.find_proposal_reservation_by_capture_id(CAPTURE_ID)
+        )
+        self.assertIsNone(self.state_store.find_proposal_by_capture_id(CAPTURE_ID))
         self.assertIsNone(result.raw_response_path)
 
     # Mutation caught: treating every ProposalEvidenceCollision as proposal_evidence_failed.
@@ -645,17 +796,33 @@ class ProposalServiceTests(unittest.TestCase):
         )
         self.assertIsNone(self.state_store.find_proposal_by_capture_id(CAPTURE_ID))
 
-    def test_partial_proposal_content_is_preserved_and_fails_closed(self) -> None:
+    def test_preexisting_matching_proposal_content_fails_before_reservation(self) -> None:
         self._classified()
-        partial = self.runtime_root / "proposal-content" / PROPOSAL_ID
-        partial.mkdir(parents=True)
-        (partial / "partial.txt").write_text("preserve", encoding="utf-8")
+        body = render_proposal_body(parse_proposal_response(PROPOSAL_RAW))
+        established = self.content_store.create(
+            PROPOSAL_ID,
+            CLASSIFICATION_ID,
+            CAPTURE_ID,
+            hashlib.sha256(PROPOSAL_RAW.encode("utf-8")).hexdigest(),
+            body,
+        )
+        adapter = InspectingAdapter(self.state_store)
 
-        result = self._service(InspectingAdapter(self.state_store)).propose(CAPTURE_ID)
+        result = self._service(adapter).propose(CAPTURE_ID)
 
-        self._assert_recorded_attempt_failure(result, "proposal_content_failed")
-        self.assertEqual((partial / "partial.txt").read_text(), "preserve")
-        self.assertIsNotNone(result.raw_response_path)
+        self.assertEqual(result.status, ProposalStatus.FAILED)
+        self.assertEqual(result.reason, "proposal_consistency_failed")
+        self.assertEqual(adapter.proposal_prompts, [])
+        self.assertEqual(established.body_path.read_bytes(), body)
+        self.assertEqual(
+            self.state_store.find_intake_by_capture_id(CAPTURE_ID).state,
+            "classified",
+        )
+        self.assertIsNone(
+            self.state_store.find_proposal_reservation_by_capture_id(CAPTURE_ID)
+        )
+        self.assertIsNone(self.state_store.find_proposal_by_capture_id(CAPTURE_ID))
+        self.assertIsNone(result.raw_response_path)
         self.assertIsNone(result.content_path)
 
     def test_proposal_persistence_failure_is_recorded(self) -> None:
@@ -671,22 +838,44 @@ class ProposalServiceTests(unittest.TestCase):
         self.assertIsNotNone(result.raw_response_path)
         self.assertIsNotNone(result.content_path)
 
-    def test_existing_draft_is_a_collision_and_records_draft_failure(self) -> None:
+    def test_preexisting_draft_fails_before_reservation(self) -> None:
         self._classified()
         draft = self.runtime_root / "vault" / "notes" / "proposed"
         draft.mkdir(parents=True)
         path = draft / f"note.{CAPTURE_ID}.md"
         path.write_text("preexisting", encoding="utf-8")
+        adapter = InspectingAdapter(self.state_store)
 
-        result = self._service(InspectingAdapter(self.state_store)).propose(CAPTURE_ID)
+        result = self._service(adapter).propose(CAPTURE_ID)
 
         self.assertEqual(result.status, ProposalStatus.FAILED)
-        self.assertEqual(result.reason, "draft_collision")
+        self.assertEqual(result.reason, "proposal_consistency_failed")
+        self.assertEqual(adapter.proposal_prompts, [])
         self.assertEqual(path.read_text(encoding="utf-8"), "preexisting")
         intake = self.state_store.find_intake_by_capture_id(CAPTURE_ID)
-        self.assertEqual(intake.state, "failed")
-        self.assertEqual(intake.failure_reason, "proposal.draft_collision")
-        self.assertIsNotNone(self.state_store.find_proposal_by_capture_id(CAPTURE_ID))
+        self.assertEqual(intake.state, "classified")
+        self.assertIsNone(intake.failure_reason)
+        self.assertIsNone(
+            self.state_store.find_proposal_reservation_by_capture_id(CAPTURE_ID)
+        )
+        self.assertIsNone(self.state_store.find_proposal_by_capture_id(CAPTURE_ID))
+
+    def test_matching_draft_create_race_winner_is_reused(self) -> None:
+        self._classified()
+        adapter = InspectingAdapter(self.state_store)
+
+        result = self._service(
+            adapter,
+            draft_store=RaceWinningDraftStore(self.draft_store),
+        ).propose(CAPTURE_ID)
+
+        self.assertEqual(result.status, ProposalStatus.PROPOSED)
+        self.assertEqual(len(adapter.proposal_prompts), 1)
+        self.assertEqual(result.intake_state, "awaiting_approval")
+        self.assertEqual(
+            self.state_store.find_proposal_by_capture_id(CAPTURE_ID).draft_note_path,
+            result.draft_path,
+        )
 
     def test_draft_write_failure_is_recorded_without_unsafe_detail(self) -> None:
         self._classified()

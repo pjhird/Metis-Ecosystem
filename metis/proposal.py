@@ -60,6 +60,28 @@ from .proposal_evidence import (
 )
 
 
+RESERVATION_FAILURE_REASONS = frozenset(
+    {
+        "proposal.proposal_consistency_failed",
+        "proposal.model_configuration_failed",
+        "proposal.model_request_failed",
+        "proposal.model_response_refused",
+        "proposal.model_response_truncated",
+        "proposal.model_response_invalid",
+        "proposal.proposal_evidence_failed",
+        "proposal.proposal_content_failed",
+        "proposal.proposal_persistence_failed",
+    }
+)
+DRAFT_FAILURE_REASONS = frozenset(
+    {
+        "proposal.draft_write_failed",
+        "proposal.draft_collision",
+        "proposal.proposal_persistence_failed",
+    }
+)
+
+
 class ProposalStatus(str, Enum):
     PROPOSED = "proposed"
     DUPLICATE = "duplicate"
@@ -136,6 +158,22 @@ class ProposalService:
                     classification=classification,
                     intake_state=intake.state,
                 )
+            if not self._state_invariant_is_valid(
+                intake,
+                classification,
+                proposal,
+                reservation,
+            ):
+                return self._consistency_failure(
+                    capture_id,
+                    classification=classification,
+                    proposal_id=(
+                        proposal.proposal_id
+                        if proposal is not None
+                        else None if reservation is None else reservation.proposal_id
+                    ),
+                    intake_state=intake.state,
+                )
             if intake.state == "awaiting_approval":
                 return self._replay(
                     intake,
@@ -206,6 +244,30 @@ class ProposalService:
                 classification=classification,
                 intake_state=intake.state,
             )
+        expected_artifacts = (
+            self._runtime_root / "proposal-evidence" / proposal_id,
+            self._runtime_root / "proposal-content" / proposal_id,
+            (
+                self._runtime_root
+                / "vault"
+                / "notes"
+                / "proposed"
+                / f"note.{capture_id}.md"
+            ),
+        )
+        try:
+            if any(self._path_is_present(path) for path in expected_artifacts):
+                return self._consistency_failure(
+                    capture_id,
+                    classification=classification,
+                    intake_state=intake.state,
+                )
+        except OSError:
+            return self._consistency_failure(
+                capture_id,
+                classification=classification,
+                intake_state=intake.state,
+            )
         try:
             now = self._clock().astimezone(timezone.utc).replace(microsecond=0)
         except (AttributeError, OverflowError, TypeError, ValueError):
@@ -226,12 +288,7 @@ class ProposalService:
         try:
             self._state_store.begin_proposal(reservation)
         except StateTransitionRefused:
-            return self._consistency_failure(
-                capture_id,
-                classification=classification,
-                proposal_id=proposal_id,
-                intake_state=intake.state,
-            )
+            return self._resolve_begin_loss(capture_id)
         except StateStoreError:
             return self._state_undetermined(
                 capture_id,
@@ -436,13 +493,24 @@ class ProposalService:
             draft = self._draft_store.create(draft_path, expected_draft)
             self._draft_store.validate(draft.draft_path, expected_draft)
         except DraftNoteCollision:
-            return self._fail_draft(
-                classification,
-                record,
-                "draft_collision",
-                raw_response_path,
-                content.content_path,
-            )
+            try:
+                draft = self._draft_store.validate(draft_path, expected_draft)
+            except DraftNoteError:
+                return self._fail_draft(
+                    classification,
+                    record,
+                    "draft_collision",
+                    raw_response_path,
+                    content.content_path,
+                )
+            if draft.observed_status.value != "proposed":
+                return self._fail_draft(
+                    classification,
+                    record,
+                    "draft_collision",
+                    raw_response_path,
+                    content.content_path,
+                )
         except DraftNoteError:
             return self._fail_draft(
                 classification,
@@ -1223,6 +1291,13 @@ class ProposalService:
             raise ValueError("timestamp is not canonical UTC")
         return parsed
 
+    def _path_is_present(self, path: Path) -> bool:
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            return False
+        return True
+
     def _now_timestamp(self) -> str:
         return self._timestamp(
             self._clock().astimezone(timezone.utc).replace(microsecond=0)
@@ -1499,6 +1574,196 @@ class ProposalService:
             reason="proposal_state_undetermined",
             message="proposal state could not be determined",
         )
+
+    def _state_invariant_is_valid(
+        self,
+        intake,
+        classification: ClassificationRecord,
+        proposal: Optional[ProposalRecord],
+        reservation: Optional[ProposalReservationRecord],
+    ) -> bool:
+        try:
+            self._parse_timestamp(intake.state_updated_at)
+        except (TypeError, ValueError):
+            return False
+        if intake.state == "classified":
+            return (
+                intake.failure_reason is None
+                and intake.state_updated_at == classification.created_at
+                and proposal is None
+                and reservation is None
+            )
+        if intake.state == "proposing":
+            return (
+                intake.failure_reason is None
+                and proposal is None
+                and reservation is not None
+                and self._reservation_invariant_is_valid(
+                    intake,
+                    classification,
+                    reservation,
+                    failed=False,
+                )
+            )
+        if intake.state == "proposed":
+            return (
+                intake.failure_reason is None
+                and reservation is None
+                and self._proposal_state_identity_is_valid(
+                    intake,
+                    classification,
+                    proposal,
+                    registered=False,
+                )
+            )
+        if intake.state == "awaiting_approval":
+            return (
+                intake.failure_reason is None
+                and reservation is None
+                and self._proposal_state_identity_is_valid(
+                    intake,
+                    classification,
+                    proposal,
+                    registered=True,
+                )
+            )
+        if intake.state != "failed" or intake.failure_reason is None:
+            return False
+        if reservation is not None:
+            return (
+                proposal is None
+                and intake.failure_reason in RESERVATION_FAILURE_REASONS
+                and self._reservation_invariant_is_valid(
+                    intake,
+                    classification,
+                    reservation,
+                    failed=True,
+                )
+            )
+        return (
+            intake.failure_reason in DRAFT_FAILURE_REASONS
+            and self._proposal_state_identity_is_valid(
+                intake,
+                classification,
+                proposal,
+                registered=False,
+            )
+        )
+
+    def _resolve_begin_loss(self, capture_id: str) -> ProposalResult:
+        try:
+            intake = self._state_store.find_intake_by_capture_id(capture_id)
+            classification = self._state_store.find_classification_by_capture_id(
+                capture_id
+            )
+            proposal = self._state_store.find_proposal_by_capture_id(capture_id)
+            reservation = (
+                self._state_store.find_proposal_reservation_by_capture_id(capture_id)
+            )
+        except StateStoreError:
+            return self._state_undetermined(capture_id)
+        if intake is None or classification is None:
+            return self._state_undetermined(capture_id)
+        if (
+            self._validated_prior_state(intake, classification) is None
+            or not self._state_invariant_is_valid(
+                intake,
+                classification,
+                proposal,
+                reservation,
+            )
+        ):
+            return self._state_undetermined(
+                capture_id,
+                classification=classification,
+                intake_state=intake.state,
+            )
+        if intake.state == "proposing" and reservation is not None:
+            try:
+                now = self._clock().astimezone(timezone.utc).replace(microsecond=0)
+                expires = self._parse_timestamp(reservation.lease_expires_at)
+            except (AttributeError, OverflowError, TypeError, ValueError):
+                return self._state_undetermined(
+                    capture_id,
+                    classification=classification,
+                    intake_state=intake.state,
+                )
+            if expires > now:
+                return self._result(
+                    ProposalStatus.REFUSED,
+                    capture_id,
+                    classification=classification,
+                    proposal_id=reservation.proposal_id,
+                    risk_level=risk_for_sensitivity(classification.sensitivity),
+                    intake_state=intake.state,
+                    reason="proposal_in_progress",
+                    message="proposal generation is already in progress",
+                )
+        if intake.state == "awaiting_approval":
+            replay = self._replay(
+                intake,
+                classification,
+                proposal,
+                reservation,
+            )
+            if replay.status is ProposalStatus.DUPLICATE:
+                return replay
+        return self._state_undetermined(
+            capture_id,
+            classification=classification,
+            intake_state=intake.state,
+        )
+
+    def _reservation_invariant_is_valid(
+        self,
+        intake,
+        classification: ClassificationRecord,
+        reservation: ProposalReservationRecord,
+        *,
+        failed: bool,
+    ) -> bool:
+        if (
+            not is_ulid(reservation.proposal_id)
+            or reservation.capture_id != intake.capture_id
+            or reservation.classification_id != classification.classification_id
+            or not self._is_uuid4(reservation.lease_token)
+        ):
+            return False
+        try:
+            reserved_at = self._parse_timestamp(reservation.reserved_at)
+            lease_expires_at = self._parse_timestamp(reservation.lease_expires_at)
+        except (TypeError, ValueError):
+            return False
+        if failed:
+            return (
+                reserved_at <= lease_expires_at
+                and intake.state_updated_at == reservation.lease_expires_at
+            )
+        return (
+            lease_expires_at - reserved_at == timedelta(minutes=15)
+            and intake.state_updated_at == reservation.reserved_at
+        )
+
+    def _proposal_state_identity_is_valid(
+        self,
+        intake,
+        classification: ClassificationRecord,
+        proposal: Optional[ProposalRecord],
+        *,
+        registered: bool,
+    ) -> bool:
+        if (
+            proposal is None
+            or not is_ulid(proposal.proposal_id)
+            or proposal.capture_id != intake.capture_id
+            or proposal.classification_id != classification.classification_id
+            or proposal.state != "pending"
+        ):
+            return False
+        expected_path = f"vault/notes/proposed/note.{intake.capture_id}.md"
+        if registered:
+            return proposal.draft_note_path == expected_path
+        return proposal.draft_note_path is None
 
     def _validated_prior_state(
         self,

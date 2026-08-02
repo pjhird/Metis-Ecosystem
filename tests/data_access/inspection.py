@@ -14,3 +14,40 @@ def table_row_count(store, table: str) -> int:
     return store._connection.execute(
         f"SELECT COUNT(*) FROM {table}"
     ).fetchone()[0]
+
+
+def force_intake_state(
+    store,
+    capture_id: str,
+    *,
+    state: str,
+    state_updated_at: str,
+    failure_reason: str | None,
+) -> None:
+    cursor = store._connection.execute(
+        "UPDATE intake SET state = ?, state_updated_at = ?, failure_reason = ? "
+        "WHERE capture_id = ?",
+        (state, state_updated_at, failure_reason, capture_id),
+    )
+    if cursor.rowcount != 1:
+        store._connection.rollback()
+        raise AssertionError("test intake state mutation missed its row")
+    store._connection.commit()
+
+
+def force_proposal_reservation_timestamps(
+    store,
+    capture_id: str,
+    *,
+    reserved_at: str,
+    lease_expires_at: str,
+) -> None:
+    cursor = store._connection.execute(
+        "UPDATE proposal_reservation SET reserved_at = ?, lease_expires_at = ? "
+        "WHERE capture_id = ?",
+        (reserved_at, lease_expires_at, capture_id),
+    )
+    if cursor.rowcount != 1:
+        store._connection.rollback()
+        raise AssertionError("test reservation mutation missed its row")
+    store._connection.commit()

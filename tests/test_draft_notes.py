@@ -101,6 +101,31 @@ class DraftNoteTests(unittest.TestCase):
         self.assertEqual(record.observed_status, DraftStatus.PROPOSED)
         self.assertEqual(self.store.validate(DRAFT_PATH, self.expected), record)
 
+    def test_status_like_body_and_reason_lines_are_not_frontmatter_fields(self) -> None:
+        bodies = {
+            "body": (
+                b"status: proposed\n\n## Proposal rationale\nReason.\n\n"
+                b"## Uncertainties\nNone identified by the proposal model.\n"
+            ),
+            "reason": (
+                b"A reviewable proposal.\n\n## Proposal rationale\n"
+                b"status: proposed\n\n## Uncertainties\n"
+                b"None identified by the proposal model.\n"
+            ),
+        }
+        for name, body in bodies.items():
+            with self.subTest(name=name):
+                root = self.runtime_root / name
+                store = DraftNoteStore(root)
+                proposal = proposal_record(
+                    content_hash=hashlib.sha256(body).hexdigest()
+                )
+                expected = render_proposed_draft(proposal, body)
+
+                created = store.create(DRAFT_PATH, expected)
+
+                self.assertEqual(store.validate(DRAFT_PATH, expected), created)
+
     def test_approved_and_rejected_status_are_preserved_not_interpreted(self) -> None:
         for status in (DraftStatus.APPROVED, DraftStatus.REJECTED):
             with self.subTest(status=status.value):

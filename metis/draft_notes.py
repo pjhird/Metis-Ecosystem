@@ -231,7 +231,13 @@ class DraftNoteStore:
         if type(expected_bytes) is not bytes or not expected_bytes:
             raise ValueError("expected draft bytes are invalid")
         expected_bytes.decode("utf-8")
-        if expected_bytes.count(b"status: proposed\n") != 1:
+        if not expected_bytes.startswith(b"---\n"):
+            raise ValueError("expected draft frontmatter is invalid")
+        frontmatter_end = expected_bytes.find(b"---\n\n", len(b"---\n"))
+        if frontmatter_end == -1:
+            raise ValueError("expected draft frontmatter is invalid")
+        frontmatter = expected_bytes[len(b"---\n") : frontmatter_end]
+        if frontmatter.splitlines(keepends=True).count(b"status: proposed\n") != 1:
             raise ValueError("expected draft status field is invalid")
 
     def _record(

@@ -23,7 +23,11 @@ from metis.proposal_content import ProposalContentStore
 from metis.proposal_contract import parse_proposal_response, render_proposal_body
 from metis.proposal_evidence import ProposalEvidenceStore
 
-from tests.data_access.inspection import table_row_count
+from tests.data_access.inspection import (
+    force_intake_state,
+    force_proposal_reservation_timestamps,
+    table_row_count,
+)
 from tests.test_proposal import (
     CAPTURE_ID,
     CLASSIFICATION_ID,
@@ -457,6 +461,184 @@ class ProposalRecoveryTests(unittest.TestCase):
             "propose-v1",
             "2026-08-02T20:00:00Z",
         )
+
+    def _crash_after_proposal_completion(self) -> None:
+        with self.assertRaises(InjectedCrash):
+            self._service(
+                RecoveryAdapter(),
+                state_store=CrashAfterStateMutationStore(
+                    self.state_store,
+                    "complete_proposal",
+                ),
+            ).propose(CAPTURE_ID)
+
+    def test_proposing_with_failure_reason_is_refused_before_reclaim(self):
+        reservation = self._reserve(expires_at="2026-08-02T20:15:00Z")
+        force_intake_state(
+            self.state_store,
+            CAPTURE_ID,
+            state="proposing",
+            state_updated_at=reservation.reserved_at,
+            failure_reason="proposal.model_request_failed",
+        )
+        adapter = RecoveryAdapter()
+
+        result = self._service(
+            adapter,
+            lease_token_factory=lambda: RECLAIMED_TOKEN,
+            at_minute=16,
+        ).propose(CAPTURE_ID)
+
+        self.assertEqual(result.status, ProposalStatus.FAILED)
+        self.assertEqual(result.reason, "proposal_consistency_failed")
+        self.assertEqual(adapter.calls, 0)
+        self.assertEqual(
+            self.state_store.find_proposal_reservation_by_capture_id(CAPTURE_ID),
+            reservation,
+        )
+        self.assertEqual(
+            self.state_store.find_intake_by_capture_id(CAPTURE_ID).failure_reason,
+            "proposal.model_request_failed",
+        )
+
+    def test_proposing_requires_exact_fifteen_minute_lease(self):
+        self._reserve(expires_at="2026-08-02T20:15:00Z")
+        force_proposal_reservation_timestamps(
+            self.state_store,
+            CAPTURE_ID,
+            reserved_at="2026-08-02T20:00:00Z",
+            lease_expires_at="2026-08-02T20:16:00Z",
+        )
+        reservation = self.state_store.find_proposal_reservation_by_capture_id(
+            CAPTURE_ID
+        )
+        adapter = RecoveryAdapter()
+
+        result = self._service(
+            adapter,
+            lease_token_factory=lambda: RECLAIMED_TOKEN,
+            at_minute=17,
+        ).propose(CAPTURE_ID)
+
+        self.assertEqual(result.status, ProposalStatus.FAILED)
+        self.assertEqual(result.reason, "proposal_consistency_failed")
+        self.assertEqual(adapter.calls, 0)
+        self.assertEqual(
+            self.state_store.find_proposal_reservation_by_capture_id(CAPTURE_ID),
+            reservation,
+        )
+
+    def test_proposing_requires_state_and_reservation_timestamp_agreement(self):
+        reservation = self._reserve(expires_at="2026-08-02T20:15:00Z")
+        force_intake_state(
+            self.state_store,
+            CAPTURE_ID,
+            state="proposing",
+            state_updated_at="2026-08-02T20:01:00Z",
+            failure_reason=None,
+        )
+        adapter = RecoveryAdapter()
+
+        result = self._service(
+            adapter,
+            lease_token_factory=lambda: RECLAIMED_TOKEN,
+            at_minute=16,
+        ).propose(CAPTURE_ID)
+
+        self.assertEqual(result.status, ProposalStatus.FAILED)
+        self.assertEqual(result.reason, "proposal_consistency_failed")
+        self.assertEqual(adapter.calls, 0)
+        self.assertEqual(
+            self.state_store.find_proposal_reservation_by_capture_id(CAPTURE_ID),
+            reservation,
+        )
+
+    def test_failed_reservation_requires_failure_timestamp_agreement(self):
+        self._reserve(expires_at="2026-08-02T20:15:00Z")
+        self.state_store.record_proposal_failure(
+            CAPTURE_ID,
+            LEASE_TOKEN,
+            "proposal.model_request_failed",
+            "2026-08-02T20:01:00Z",
+        )
+        force_intake_state(
+            self.state_store,
+            CAPTURE_ID,
+            state="failed",
+            state_updated_at="2026-08-02T20:02:00Z",
+            failure_reason="proposal.model_request_failed",
+        )
+        reservation = self.state_store.find_proposal_reservation_by_capture_id(
+            CAPTURE_ID
+        )
+        adapter = RecoveryAdapter()
+
+        result = self._service(
+            adapter,
+            lease_token_factory=lambda: RECLAIMED_TOKEN,
+            at_minute=16,
+        ).propose(CAPTURE_ID)
+
+        self.assertEqual(result.status, ProposalStatus.FAILED)
+        self.assertEqual(result.reason, "proposal_consistency_failed")
+        self.assertEqual(adapter.calls, 0)
+        self.assertEqual(
+            self.state_store.find_proposal_reservation_by_capture_id(CAPTURE_ID),
+            reservation,
+        )
+
+    def test_proposed_with_failure_reason_does_not_write_draft(self):
+        self._crash_after_proposal_completion()
+        force_intake_state(
+            self.state_store,
+            CAPTURE_ID,
+            state="proposed",
+            state_updated_at="2026-08-02T20:01:00Z",
+            failure_reason="proposal.draft_write_failed",
+        )
+        draft_path = (
+            self.runtime_root
+            / "vault"
+            / "notes"
+            / "proposed"
+            / f"note.{CAPTURE_ID}.md"
+        )
+
+        result = self._service(RecoveryAdapter(allow_call=False)).propose(CAPTURE_ID)
+
+        self.assertEqual(result.status, ProposalStatus.FAILED)
+        self.assertEqual(result.reason, "proposal_consistency_failed")
+        self.assertFalse(draft_path.exists())
+        self.assertEqual(
+            self.state_store.find_intake_by_capture_id(CAPTURE_ID).failure_reason,
+            "proposal.draft_write_failed",
+        )
+
+    def test_failed_proposal_requires_draft_stage_failure_reason(self):
+        self._crash_after_proposal_completion()
+        force_intake_state(
+            self.state_store,
+            CAPTURE_ID,
+            state="failed",
+            state_updated_at="2026-08-02T20:01:00Z",
+            failure_reason="proposal.model_request_failed",
+        )
+        draft_path = (
+            self.runtime_root
+            / "vault"
+            / "notes"
+            / "proposed"
+            / f"note.{CAPTURE_ID}.md"
+        )
+
+        result = self._service(RecoveryAdapter(allow_call=False)).propose(CAPTURE_ID)
+
+        self.assertEqual(result.status, ProposalStatus.FAILED)
+        self.assertEqual(result.reason, "proposal_consistency_failed")
+        self.assertFalse(draft_path.exists())
+        intake = self.state_store.find_intake_by_capture_id(CAPTURE_ID)
+        self.assertEqual(intake.state, "failed")
+        self.assertEqual(intake.failure_reason, "proposal.model_request_failed")
 
     # Mutation caught: moving the provider call before the durable reservation.
     def test_crash_after_reservation_reclaims_one_stable_proposal_id(self):
