@@ -4,8 +4,9 @@
 > Phase 1. Decisions referenced are in [METIS-DECISIONS.md](METIS-DECISIONS.md).
 >
 > The five operational-state tables are implemented by
-> `metis/data_access/migrations/001_initial.sql`. Evidence storage is implemented; the Obsidian notes described
-> here remain unimplemented.
+> `metis/data_access/migrations/001_initial.sql`; migration `002_unique_classification_capture.sql` enforces one
+> classification per capture. Source and classification-response evidence storage are implemented; the
+> Obsidian notes described here remain unimplemented.
 
 ## Scope
 
@@ -21,6 +22,8 @@ Three stores, per ADR-001 / ADR-002 / ADR-003:
 ---
 
 ## 1. Evidence store
+
+### 1.1 Source capture evidence
 
 Layout:
 
@@ -54,6 +57,39 @@ Rules:
 - UUID4 capture identifiers are stable handles, not chronological sort keys.
 - `content_hash` is computed over the raw bytes only, not the metadata.
 
+### 1.2 Classification response evidence
+
+Layout:
+
+```text
+classification-evidence/
+└── <classification_id>/
+    ├── raw-response.txt # exact assistant text encoded as UTF-8
+    └── meta.json        # response provenance, written once
+```
+
+`meta.json`:
+
+```json
+{
+  "classification_id": "01K1D5Q5M00000000000000000",
+  "capture_id": "8f14e45f-ea3c-4f7a-9f2d-6c8b5a1d3e70",
+  "model_id": "claude-sonnet-4-6",
+  "prompt_version": "classify-v1",
+  "received_at": "2026-08-01T20:00:00Z",
+  "byte_size": 72,
+  "schema_version": 1
+}
+```
+
+Rules:
+
+- `classification_id` is a canonical 26-character Crockford Base32 ULID.
+- `raw-response.txt` contains exactly `raw_text.encode("utf-8")`; it is not trimmed, normalized, or rewritten.
+- The response directory is exclusively created and validated before the response is parsed or classification is persisted.
+- Response evidence is separate from immutable source evidence and is never permanent knowledge.
+- Partial, colliding, corrupt, or inconsistent response evidence is preserved and fails closed; Metis does not repair it automatically.
+
 ---
 
 ## 2. Operational state (SQLite)
@@ -82,17 +118,18 @@ on application logic to notice. This is the enforcement mechanism for REQ-INTK-0
 | Column | Type | Notes |
 |---|---|---|
 | `classification_id` | TEXT PK | ULID |
-| `capture_id` | TEXT FK → intake | |
+| `capture_id` | TEXT FK → intake, UNIQUE | migration 002 enforces one classification per capture |
 | `candidate_type` | TEXT | `idea` · `reference` · `decision` · `question` · `task` |
 | `sensitivity` | TEXT | `normal` · `sensitive` |
 | `confidence` | REAL | 0.0–1.0 |
-| `routing` | TEXT | which downstream path was chosen |
+| `routing` | TEXT | deterministic `proposal:<candidate_type>` label; Step 3 does not create a proposal |
 | `model_id` | TEXT | the model actually used |
 | `prompt_version` | TEXT | REQ-MODEL-003 |
 | `raw_response_path` | TEXT | the model's unmodified output, stored as evidence |
 | `created_at` | TEXT | |
 
-The model's raw response is preserved. A classification is evidence of what a model said, not a fact.
+The model's raw response is preserved before parsing. A classification is evidence of what a model said, not
+a fact, and Step 3 grants it no write authority over durable knowledge.
 
 ### 2.3 `proposal`
 

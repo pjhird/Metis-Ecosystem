@@ -13,13 +13,13 @@ Status vocabulary is the blueprint's own:
 - **Missing** — no artifact exists yet
 - **Superseded** — replaced by a later decision
 
-Step 1 verified only the repository entrypoints, clean-checkout test setup, and current data-access boundary.
-Step 2 adds partial evidence for immutable typed capture and exact replay protection; it does not verify a
-permanent note, classification, vault, model, orchestration, approval, filing, linking, or audit behavior. A
-requirement moves to Verified only when a test run or observed behavior proves it — never because a document
-mentions it.
+Step 1 verified the repository and data-access foundation. Step 2 added immutable typed capture and exact
+replay protection. Step 3 adds explicit classification, a bounded provider seam, prompt-version persistence,
+raw-response preservation, deterministic routing, and fail-closed classification transitions. It does not
+verify a permanent note, proposal, vault, approval, filing, linking, or audit behavior. A requirement moves to
+Verified only when a test run or observed behavior proves it — never because a document mentions it.
 
-Last reviewed: 2026-07-31 · Repository state at review: build-order step 2
+Last reviewed: 2026-08-01 · Repository state at review: build-order step 3
 
 ---
 
@@ -47,17 +47,17 @@ Last reviewed: 2026-07-31 · Repository state at review: build-order step 2
 
 | ID | Requirement | Source | Status | Design artifact | Evidence needed |
 |---|---|---|---|---|---|
-| REQ-INTK-001 | Capture preserves input immutably before any processing | BP §9, §11 | Partial | ADR-003, ADR-015 | Byte-exact evidence, SHA-256 metadata, and metadata contract: `test_create_preserves_raw_bytes_exactly`, `test_content_hash_matches_fresh_sha256_of_raw`, `test_create_writes_exact_metadata_contract`; evidence finalizes before registration: `test_evidence_is_finalized_before_registration`. Still needed for Verified: evidence surviving a later classification stage, which is not built. |
+| REQ-INTK-001 | Capture preserves input immutably before any processing | BP §9, §11 | Verified | ADR-003, ADR-015; `EvidenceStore` | Byte-exact evidence and pre-registration ordering tests; `test_source_survives_classification_failure`; `test_model_failure_records_failed_and_preserves_source` |
 | REQ-INTK-002 | Replaying the same input creates no duplicate permanent record | BP §9, §11 | Partial | ADR-014 | Exact replay leaves one intake row and one evidence directory: `test_exact_replay_creates_one_row_and_one_evidence_directory`; matching state and evidence return `duplicate`: `test_exact_replay_returns_duplicate_for_matching_state_and_evidence`. Still needed for Verified: `duplicate_replay_creates_one_note` after permanent-note filing exists. |
-| REQ-INTK-003 | Classification produces candidate type, sensitivity, routing, confidence | MP §24, BP §9 | Missing | `classification` table | Fixture test asserting shape and confidence bounds |
+| REQ-INTK-003 | Classification produces candidate type, sensitivity, routing, confidence | MP §24, BP §9 | Verified | `ClassificationService`, `classification` table | `test_valid_response_is_preserved_then_persisted`; `test_invalid_enum_confidence_boolean_nonfinite_and_out_of_range_are_rejected`; `test_capture_classify_and_replay_complete_local_path` |
 | REQ-INTK-004 | Approved intake links to an existing goal or project without duplicates or orphans | BP §13, Phase 6 | Missing | ADR-013, note schemas | `unresolvable_link_blocks_commit` |
-| REQ-INTK-005 | Failure preserves the source and produces a visible review state, never a false "complete" | BP §9, §11 | Partial | State machine failure states | Registration failure preserves finalized evidence: `test_registration_failure_preserves_finalized_evidence`; a complete orphan is reused safely on retry: `test_complete_orphan_is_reused_after_registration_failure`. Still needed for Verified: `source_survives_classification_failure` and a visible review state; classification and review are not built. |
+| REQ-INTK-005 | Failure preserves the source and produces a visible review state, never a false "complete" | BP §9, §11 | Partial | State machine failure states; classification reason codes | `test_source_survives_classification_failure`, response-preservation tests, and `test_completion_failure_never_reports_classified` pass. Still needed for Verified: the governed visible review item/surface, which is not built. |
 
 ## Orchestration
 
 | ID | Requirement | Source | Status | Design artifact | Evidence needed |
 |---|---|---|---|---|---|
-| REQ-ORCH-001 | A deterministic orchestrator owns all state transitions | MP §18, BP §10 | Missing | ADR-007 | `illegal_state_transition_is_rejected` |
+| REQ-ORCH-001 | A deterministic orchestrator owns all state transitions | MP §18, BP §10 | Partial | ADR-007; `CaptureService`; `ClassificationService`; `StateStore` | Classification compare-and-swap and illegal-edge tests pass in `tests.data_access.test_classification_store`; proposal through audit transitions remain unimplemented. |
 | REQ-ORCH-002 | Skills never call each other or reach persistence directly | BP §10 | Missing | ADR-007 | Permission test |
 | REQ-ORCH-003 | Time, cost, and retry limits established per execution | MP §14, §18 | Deferred | — | Low priority for a single-user MVP; named rather than dropped |
 | REQ-ORCH-004 | Every material action produces an audit event | MP §22, BP §7 | Missing | `audit_event` table | Test: each transition emits exactly one event |
@@ -66,9 +66,9 @@ Last reviewed: 2026-07-31 · Repository state at review: build-order step 2
 
 | ID | Requirement | Source | Status | Design artifact | Evidence needed |
 |---|---|---|---|---|---|
-| REQ-MODEL-001 | Providers are replaceable without rewriting the system | MP §30 | Missing | ADR-008 | `provider_sdk_imported_only_by_adapter` |
-| REQ-MODEL-002 | Model output is a proposal, never a fact | MP §32, BP §7 | Missing | ADR-004, proposal schema | Test: classification output cannot reach the vault unapproved |
-| REQ-MODEL-003 | Prompt versions are recorded with each execution | MP §30 | Missing | `classification.prompt_version` | Schema validation |
+| REQ-MODEL-001 | Providers are replaceable without rewriting the system | MP §30 | Verified | ADR-008; `ModelAdapter`; `ClaudeModelAdapter` | `test_model_adapter_contract_is_provider_neutral`; `test_provider_sdk_imported_only_by_adapter` |
+| REQ-MODEL-002 | Model output is a proposal, never a fact | MP §32, BP §7 | Partial | ADR-004; response evidence; classification state | Classification output is isolated as evidence/state and Step 3 has no vault path. Still needed: proposal and approval-gated vault tests. |
+| REQ-MODEL-003 | Prompt versions are recorded with each execution | MP §30 | Verified | packaged `classify-v1`; `classification.prompt_version` | `test_classification_prompt_is_immutable_version_one`; `test_valid_response_is_preserved_then_persisted`; `test_capture_classify_and_replay_complete_local_path` |
 
 ## Obsidian vault
 
@@ -100,7 +100,7 @@ Last reviewed: 2026-07-31 · Repository state at review: build-order step 2
 |---|---|---|---|---|---|
 | REQ-TEST-001 | Critical negative tests exist and pass | BP §11 | Missing | Test plan | The nine tests named in AGENTS.md |
 | REQ-TEST-002 | No capability declared working without a recorded test run | BP §11 | Missing | — | Standing constraint on all reporting, including this ledger |
-| REQ-TEST-003 | Schema validation for every structured artifact | BP §11 | Partial | Schema doc; `001_initial.sql` | All five SQLite table structures and SQL-enforced constraints validated; evidence metadata contract validation: `test_create_writes_exact_metadata_contract`, `test_validation_rejects_invalid_metadata_key_set`, `test_validation_rejects_metadata_values_that_disagree_with_evidence`; other JSON field contents and note schemas remain unimplemented |
+| REQ-TEST-003 | Schema validation for every structured artifact | BP §11 | Partial | Schema doc; migrations 001–002; both evidence stores | SQLite constraints, source/response metadata, model JSON, and CLI result shapes are validated. Proposal, approval, audit-detail, and note schemas remain unimplemented. |
 
 ## Repository and tooling
 

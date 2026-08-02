@@ -180,6 +180,7 @@ To be filled in as they are created. Keep this section accurate; it is the first
 
 ```
 metis capture "<text>"     # immutable typed capture with exact replay protection
+metis classify <capture_id> # classify one preserved capture through the configured model adapter
 metis approvals            # not yet implemented
 metis status               # not yet implemented
 ```
