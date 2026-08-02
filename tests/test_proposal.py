@@ -30,8 +30,14 @@ from metis.model_adapters import (
     UnsupportedModelResponse,
 )
 from metis.proposal import ProposalService, ProposalStatus
-from metis.proposal_content import ProposalContentStore
-from metis.proposal_evidence import ProposalEvidenceStore
+from metis.proposal_content import (
+    ProposalContentCollision,
+    ProposalContentStore,
+)
+from metis.proposal_evidence import (
+    ProposalEvidenceCollision,
+    ProposalEvidenceStore,
+)
 
 
 CAPTURE_ID = "8f14e45f-ea3c-4f7a-9f2d-6c8b5a1d3e70"
@@ -51,6 +57,11 @@ PROPOSAL_RAW = json.dumps(
     },
     separators=(",", ":"),
 )
+MISMATCHED_PROPOSAL_RAW = (
+    '{"title":"Different proposal","body":"Do not reuse this response.",'
+    '"reason":"A complete but different winner.","uncertainties":[]}'
+)
+MISMATCHED_BODY_BYTES = b"Do not reuse this canonical proposal body.\n"
 
 
 class InspectingAdapter:
@@ -102,6 +113,96 @@ class FailingDraftStore:
 
     def validate(self, relative_path, expected_bytes):
         raise AssertionError("failed draft must not be validated")
+
+
+class RaceWinningProposalEvidenceStore:
+    def __init__(self, store: ProposalEvidenceStore) -> None:
+        self.store = store
+
+    def create(self, *args, **kwargs):
+        record = self.store.create(*args, **kwargs)
+        raise ProposalEvidenceCollision(
+            "simulated exclusive-create race",
+            record.evidence_path,
+        )
+
+    def validate_directory(self, directory):
+        return self.store.validate_directory(directory)
+
+
+class MismatchedProposalEvidenceStore:
+    def __init__(self, store: ProposalEvidenceStore) -> None:
+        self.store = store
+
+    def create(
+        self,
+        proposal_id,
+        classification_id,
+        capture_id,
+        raw_text,
+        model_id,
+        prompt_version,
+        received_at,
+    ):
+        record = self.store.create(
+            proposal_id,
+            classification_id,
+            capture_id,
+            MISMATCHED_PROPOSAL_RAW,
+            model_id,
+            prompt_version,
+            received_at,
+        )
+        raise ProposalEvidenceCollision(
+            "simulated exclusive-create race",
+            record.evidence_path,
+        )
+
+    def validate_directory(self, directory):
+        return self.store.validate_directory(directory)
+
+
+class RaceWinningProposalContentStore:
+    def __init__(self, store: ProposalContentStore) -> None:
+        self.store = store
+
+    def create(self, *args, **kwargs):
+        record = self.store.create(*args, **kwargs)
+        raise ProposalContentCollision(
+            "simulated exclusive-create race",
+            record.content_path,
+        )
+
+    def validate_directory(self, directory):
+        return self.store.validate_directory(directory)
+
+
+class MismatchedProposalContentStore:
+    def __init__(self, store: ProposalContentStore) -> None:
+        self.store = store
+
+    def create(
+        self,
+        proposal_id,
+        classification_id,
+        capture_id,
+        raw_response_hash,
+        body_bytes,
+    ):
+        record = self.store.create(
+            proposal_id,
+            classification_id,
+            capture_id,
+            raw_response_hash,
+            MISMATCHED_BODY_BYTES,
+        )
+        raise ProposalContentCollision(
+            "simulated exclusive-create race",
+            record.content_path,
+        )
+
+    def validate_directory(self, directory):
+        return self.store.validate_directory(directory)
 
 
 class ProposalServiceTests(unittest.TestCase):
@@ -186,13 +287,19 @@ class ProposalServiceTests(unittest.TestCase):
         *,
         state_store=None,
         draft_store=None,
+        proposal_evidence_store=None,
+        content_store=None,
     ) -> ProposalService:
         return ProposalService(
             self.state_store if state_store is None else state_store,
             self.evidence_store,
             self.classification_store,
-            self.proposal_evidence_store,
-            self.content_store,
+            (
+                self.proposal_evidence_store
+                if proposal_evidence_store is None
+                else proposal_evidence_store
+            ),
+            self.content_store if content_store is None else content_store,
             self.draft_store if draft_store is None else draft_store,
             adapter,
             self.runtime_root,
@@ -443,6 +550,100 @@ class ProposalServiceTests(unittest.TestCase):
         self._assert_recorded_attempt_failure(result, "proposal_evidence_failed")
         self.assertEqual((partial / "partial.txt").read_text(), "preserve")
         self.assertIsNone(result.raw_response_path)
+
+    # Mutation caught: treating every ProposalEvidenceCollision as proposal_evidence_failed.
+    def test_matching_response_race_winner_is_reused(self) -> None:
+        self._classified()
+        adapter = InspectingAdapter(self.state_store)
+
+        result = self._service(
+            adapter,
+            proposal_evidence_store=RaceWinningProposalEvidenceStore(
+                self.proposal_evidence_store
+            ),
+        ).propose(CAPTURE_ID)
+
+        self.assertEqual(result.status, ProposalStatus.PROPOSED)
+        self.assertEqual(len(adapter.proposal_prompts), 1)
+        response_directory = self.runtime_root / "proposal-evidence" / PROPOSAL_ID
+        self.assertEqual(
+            {path.name for path in response_directory.iterdir()},
+            {"raw-response.txt", "meta.json"},
+        )
+        self.assertEqual(
+            (response_directory / "raw-response.txt").read_text(encoding="utf-8"),
+            PROPOSAL_RAW,
+        )
+
+    # Mutation caught: treating every complete ProposalEvidenceCollision winner as reusable.
+    def test_disagreeing_response_race_winner_fails_closed(self) -> None:
+        self._classified()
+        adapter = InspectingAdapter(self.state_store)
+
+        result = self._service(
+            adapter,
+            proposal_evidence_store=MismatchedProposalEvidenceStore(
+                self.proposal_evidence_store
+            ),
+        ).propose(CAPTURE_ID)
+
+        self._assert_recorded_attempt_failure(result, "proposal_evidence_failed")
+        self.assertEqual(len(adapter.proposal_prompts), 1)
+        self.assertEqual(
+            (
+                self.runtime_root
+                / "proposal-evidence"
+                / PROPOSAL_ID
+                / "raw-response.txt"
+            ).read_text(encoding="utf-8"),
+            MISMATCHED_PROPOSAL_RAW,
+        )
+        self.assertIsNone(self.state_store.find_proposal_by_capture_id(CAPTURE_ID))
+
+    # Mutation caught: treating every ProposalContentCollision as proposal_content_failed.
+    def test_matching_content_race_winner_is_reused(self) -> None:
+        self._classified()
+        adapter = InspectingAdapter(self.state_store)
+
+        result = self._service(
+            adapter,
+            content_store=RaceWinningProposalContentStore(self.content_store),
+        ).propose(CAPTURE_ID)
+
+        self.assertEqual(result.status, ProposalStatus.PROPOSED)
+        self.assertEqual(len(adapter.proposal_prompts), 1)
+        content_directory = self.runtime_root / "proposal-content" / PROPOSAL_ID
+        self.assertEqual(
+            {path.name for path in content_directory.iterdir()},
+            {"body.md", "meta.json"},
+        )
+        self.assertEqual(
+            result.content_path,
+            f"proposal-content/{PROPOSAL_ID}/body.md",
+        )
+
+    # Mutation caught: reusing a complete ProposalContentCollision winner with different bytes.
+    def test_disagreeing_content_race_winner_fails_closed(self) -> None:
+        self._classified()
+        adapter = InspectingAdapter(self.state_store)
+
+        result = self._service(
+            adapter,
+            content_store=MismatchedProposalContentStore(self.content_store),
+        ).propose(CAPTURE_ID)
+
+        self._assert_recorded_attempt_failure(result, "proposal_content_failed")
+        self.assertEqual(len(adapter.proposal_prompts), 1)
+        self.assertEqual(
+            (
+                self.runtime_root
+                / "proposal-content"
+                / PROPOSAL_ID
+                / "body.md"
+            ).read_bytes(),
+            MISMATCHED_BODY_BYTES,
+        )
+        self.assertIsNone(self.state_store.find_proposal_by_capture_id(CAPTURE_ID))
 
     def test_partial_proposal_content_is_preserved_and_fails_closed(self) -> None:
         self._classified()

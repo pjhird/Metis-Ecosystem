@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from dataclasses import dataclass
@@ -42,6 +43,7 @@ from .model_adapters import (
     UnsupportedModelResponse,
 )
 from .prompts import PROPOSAL_PROMPT_VERSION, load_proposal_prompt
+from .proposal_content import ProposalContentCollision
 from .proposal_content import ProposalContentError as ProposalContentStoreError
 from .proposal_content import ProposalContentStore
 from .proposal_contract import (
@@ -51,7 +53,11 @@ from .proposal_contract import (
     render_proposal_body,
     risk_for_sensitivity,
 )
-from .proposal_evidence import ProposalEvidenceError, ProposalEvidenceStore
+from .proposal_evidence import (
+    ProposalEvidenceCollision,
+    ProposalEvidenceError,
+    ProposalEvidenceStore,
+)
 
 
 class ProposalStatus(str, Enum):
@@ -335,28 +341,16 @@ class ProposalService:
                 intake_state="proposing",
             )
         body_bytes = render_proposal_body(semantic)
-        try:
-            content = self._content_store.create(
-                proposal_id,
-                classification.classification_id,
-                capture_id,
-                response.raw_response_hash,
-                body_bytes,
-            )
-            content = self._content_store.validate_directory(content.directory)
-        except (OSError, ProposalContentStoreError):
+        content, matches = self._preserve_content(
+            reservation,
+            response.raw_response_hash,
+            body_bytes,
+        )
+        if content is None or not matches:
             return self._fail_reserved(
                 capture_id, classification, proposal_id, lease_token,
                 "proposal_content_failed",
                 raw_response_path=raw_response_path,
-                intake_state="proposing",
-            )
-        if content.raw_response_hash != response.raw_response_hash:
-            return self._fail_reserved(
-                capture_id, classification, proposal_id, lease_token,
-                "proposal_consistency_failed",
-                raw_response_path=raw_response_path,
-                content_path=content.content_path,
                 intake_state="proposing",
             )
         try:
@@ -942,7 +936,6 @@ class ProposalService:
             classification,
             reservation,
             response,
-            content_directory,
         )
 
     def _complete_recovered_response(
@@ -950,7 +943,6 @@ class ProposalService:
         classification: ClassificationRecord,
         reservation: ProposalReservationRecord,
         response,
-        content_directory: Path,
     ) -> ProposalResult:
         raw_response_path = str(Path(response.evidence_path) / "raw-response.txt")
         try:
@@ -979,20 +971,12 @@ class ProposalService:
                 intake_state="proposing",
             )
         body_bytes = render_proposal_body(semantic)
-        try:
-            if os.path.lexists(content_directory):
-                content = self._content_store.validate_directory(content_directory)
-            else:
-                content = self._content_store.create(
-                    reservation.proposal_id,
-                    reservation.classification_id,
-                    reservation.capture_id,
-                    response.raw_response_hash,
-                    body_bytes,
-                )
-                content = self._content_store.validate_directory(content.directory)
-            observed_body = content.body_path.read_bytes()
-        except (OSError, ProposalContentStoreError):
+        content, matches = self._preserve_content(
+            reservation,
+            response.raw_response_hash,
+            body_bytes,
+        )
+        if content is None:
             return self._fail_reserved(
                 reservation.capture_id,
                 classification,
@@ -1002,13 +986,7 @@ class ProposalService:
                 raw_response_path=raw_response_path,
                 intake_state="proposing",
             )
-        if (
-            content.proposal_id != reservation.proposal_id
-            or content.capture_id != reservation.capture_id
-            or content.classification_id != reservation.classification_id
-            or content.raw_response_hash != response.raw_response_hash
-            or observed_body != body_bytes
-        ):
+        if not matches:
             return self._fail_reserved(
                 reservation.capture_id,
                 classification,
@@ -1280,7 +1258,14 @@ class ProposalService:
         model_id,
     ):
         try:
-            response = self._proposal_evidence_store.create(
+            raw_bytes = raw_text.encode("utf-8")
+        except (AttributeError, TypeError, UnicodeEncodeError):
+            return None
+        directory = (
+            self._runtime_root / "proposal-evidence" / reservation.proposal_id
+        )
+        try:
+            self._proposal_evidence_store.create(
                 reservation.proposal_id,
                 reservation.classification_id,
                 reservation.capture_id,
@@ -1289,11 +1274,68 @@ class ProposalService:
                 PROPOSAL_PROMPT_VERSION,
                 reservation.reserved_at,
             )
-            return self._proposal_evidence_store.validate_directory(
-                response.directory
-            )
+        except ProposalEvidenceCollision:
+            pass
         except ProposalEvidenceError:
             return None
+        try:
+            response = self._proposal_evidence_store.validate_directory(directory)
+            observed_bytes = response.raw_path.read_bytes()
+        except (OSError, ProposalEvidenceError):
+            return None
+        if (
+            response.proposal_id != reservation.proposal_id
+            or response.classification_id != reservation.classification_id
+            or response.capture_id != reservation.capture_id
+            or response.model_id != model_id
+            or response.prompt_version != PROPOSAL_PROMPT_VERSION
+            or response.received_at != reservation.reserved_at
+            or len(observed_bytes) != len(raw_bytes)
+            or observed_bytes != raw_bytes
+            or response.raw_response_hash != hashlib.sha256(raw_bytes).hexdigest()
+        ):
+            return None
+        return response
+
+    def _preserve_content(
+        self,
+        reservation: ProposalReservationRecord,
+        raw_response_hash: str,
+        body_bytes: bytes,
+    ):
+        directory = (
+            self._runtime_root / "proposal-content" / reservation.proposal_id
+        )
+        try:
+            expected_content_hash = hashlib.sha256(body_bytes).hexdigest()
+            if os.path.lexists(directory):
+                content = self._content_store.validate_directory(directory)
+            else:
+                try:
+                    self._content_store.create(
+                        reservation.proposal_id,
+                        reservation.classification_id,
+                        reservation.capture_id,
+                        raw_response_hash,
+                        body_bytes,
+                    )
+                except ProposalContentCollision:
+                    pass
+                content = self._content_store.validate_directory(directory)
+            observed_bytes = content.body_path.read_bytes()
+        except (OSError, ProposalContentStoreError, TypeError):
+            return None, False
+        matches = (
+            content.proposal_id == reservation.proposal_id
+            and content.classification_id == reservation.classification_id
+            and content.capture_id == reservation.capture_id
+            and content.raw_response_hash == raw_response_hash
+            and content.content_hash == expected_content_hash
+            and content.byte_size == len(body_bytes)
+            and len(observed_bytes) == len(body_bytes)
+            and observed_bytes == body_bytes
+        )
+        return content, matches
 
     def _fail_reserved(
         self,

@@ -28,6 +28,7 @@ from tests.test_proposal import (
     LEASE_TOKEN,
     PROPOSAL_ID,
     PROPOSAL_RAW,
+    RaceWinningProposalContentStore,
 )
 
 
@@ -173,6 +174,7 @@ class ProposalRecoveryTests(unittest.TestCase):
         *,
         state_store=None,
         draft_store=None,
+        content_store=None,
         proposal_id_factory=lambda: PROPOSAL_ID,
         lease_token_factory=lambda: LEASE_TOKEN,
         at_hour: int = 20,
@@ -183,7 +185,7 @@ class ProposalRecoveryTests(unittest.TestCase):
             self.evidence_store,
             self.classification_store,
             self.proposal_evidence_store,
-            self.content_store,
+            self.content_store if content_store is None else content_store,
             self.draft_store if draft_store is None else draft_store,
             adapter,
             self.runtime_root,
@@ -322,6 +324,31 @@ class ProposalRecoveryTests(unittest.TestCase):
         self.assertEqual(result.status, ProposalStatus.PROPOSED)
         self.assertEqual(adapter.calls, 0)
         self.assertTrue((self.runtime_root / result.content_path).is_file())
+
+    # Mutation caught: treating a matching ProposalContentCollision after recovery as fatal.
+    def test_expired_reservation_reuses_matching_content_race_winner(self):
+        self._reserve(expires_at="2026-08-02T20:15:00Z")
+        adapter = RecoveryAdapter()
+
+        result = self._service(
+            adapter,
+            content_store=RaceWinningProposalContentStore(self.content_store),
+            proposal_id_factory=lambda: (_ for _ in ()).throw(AssertionError()),
+            lease_token_factory=lambda: RECLAIMED_TOKEN,
+            at_minute=16,
+        ).propose(CAPTURE_ID)
+
+        self.assertEqual(result.status, ProposalStatus.PROPOSED)
+        self.assertEqual(adapter.calls, 1)
+        self.assertEqual(
+            {
+                path.name
+                for path in (
+                    self.runtime_root / "proposal-content" / PROPOSAL_ID
+                ).iterdir()
+            },
+            {"body.md", "meta.json"},
+        )
 
     def test_proposed_row_after_crash_resumes_only_draft_stage(self):
         with self.assertRaises(InjectedCrash):
