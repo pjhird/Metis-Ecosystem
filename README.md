@@ -63,7 +63,7 @@ The application requires Python 3.11 or later. Classification uses the bounded `
 python3 -m unittest discover -s tests -v
 ```
 
-The recorded Step-3 verification used Python 3.13.13 (`PATH=/opt/miniconda3/bin:/usr/bin:/bin python3`) and ran 145 tests with final `OK`. It retained the known 22 non-failing unclosed-SQLite `ResourceWarning`s in existing tests. Tests create SQLite databases and evidence only in temporary directories. Runtime databases, source evidence, response evidence, vault content, environment files, and generated Python artifacts are ignored by Git.
+The recorded Step-3 verification used Python 3.13.13 (`PATH=/opt/miniconda3/bin:/usr/bin:/bin python3`) and ran 155 tests with final `OK`. It retained the known 22 non-failing unclosed-SQLite `ResourceWarning`s in existing tests. Tests create SQLite databases and evidence only in temporary directories. Runtime databases, source evidence, response evidence, vault content, environment files, and generated Python artifacts are ignored by Git.
 
 ## Typed Capture
 
