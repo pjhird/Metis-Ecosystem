@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from metis.data_access import (
+    ClassificationRecord,
     IntakeRecord,
     IntakeRegistrationResult,
     IntakeRegistrationStatus,
@@ -98,7 +99,7 @@ class FakeStateStore:
         self.schema_version = 0
 
     def initialize(self) -> None:
-        self.schema_version = 1
+        self.schema_version = 2
 
     def close(self) -> None:
         return None
@@ -106,8 +107,29 @@ class FakeStateStore:
     def find_intake_by_content_hash(self, content_hash: str) -> IntakeRecord | None:
         return None
 
+    def find_intake_by_capture_id(self, capture_id: str) -> IntakeRecord | None:
+        return None
+
+    def find_classification_by_capture_id(
+        self, capture_id: str
+    ) -> ClassificationRecord | None:
+        return None
+
     def register_intake(self, record: IntakeRecord) -> IntakeRegistrationResult:
         return IntakeRegistrationResult(IntakeRegistrationStatus.REGISTERED, record)
+
+    def begin_classification(self, capture_id: str, started_at: str) -> IntakeRecord:
+        raise NotImplementedError
+
+    def complete_classification(
+        self, record: ClassificationRecord
+    ) -> ClassificationRecord:
+        raise NotImplementedError
+
+    def record_classification_failure(
+        self, capture_id: str, reason: str, failed_at: str
+    ) -> IntakeRecord:
+        raise NotImplementedError
 
 
 class MigrationTests(unittest.TestCase):
@@ -223,7 +245,7 @@ class MigrationTests(unittest.TestCase):
     def test_initial_migration_creates_only_the_five_operational_tables(self) -> None:
         store = self._initialize()
 
-        self.assertEqual(store.schema_version, 1)
+        self.assertEqual(store.schema_version, 2)
         with sqlite3.connect(self.database_path) as connection:
             rows = connection.execute(
                 "SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name"
@@ -359,6 +381,34 @@ class MigrationTests(unittest.TestCase):
                     with self.assertRaises(sqlite3.IntegrityError):
                         connection.execute(statement, parameters)
 
+    def test_classification_capture_is_unique(self) -> None:
+        self._initialize()
+        with sqlite3.connect(self.database_path) as connection:
+            self._insert_valid_intake(connection)
+            self._insert_valid_classification(connection)
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    """
+                    INSERT INTO classification (
+                        classification_id, capture_id, candidate_type, sensitivity,
+                        confidence, routing, model_id, prompt_version,
+                        raw_response_path, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "classification-2",
+                        "01J8X2K4P7M3QRSTVWXYZ0ABCD",
+                        "reference",
+                        "normal",
+                        0.7,
+                        "proposal",
+                        "model-1",
+                        "prompt-1",
+                        "evidence/model-response-2.json",
+                        "2026-07-31T12:00:02Z",
+                    ),
+                )
+
     def test_proposal_enums_and_confidence_are_enforced(self) -> None:
         self._initialize()
         statement = """
@@ -454,7 +504,7 @@ class MigrationTests(unittest.TestCase):
     def test_reapplying_migrations_is_idempotent(self) -> None:
         store = self._initialize()
         store.initialize()
-        self.assertEqual(store.schema_version, 1)
+        self.assertEqual(store.schema_version, 2)
         self.assertEqual(self._columns("intake"), EXPECTED_COLUMNS["intake"])
 
     def test_failed_migration_rolls_back_only_its_partial_changes(self) -> None:
@@ -515,13 +565,13 @@ class MigrationTests(unittest.TestCase):
     def test_newer_database_schema_fails_closed(self) -> None:
         self.database_path.parent.mkdir(parents=True)
         with sqlite3.connect(self.database_path) as connection:
-            connection.execute("PRAGMA user_version = 2")
+            connection.execute("PRAGMA user_version = 3")
         store = SQLiteStateStore(self.database_path)
         self.addCleanup(store.close)
 
         with self.assertRaisesRegex(
             MigrationError,
-            "database schema version 2 is newer than supported version 1",
+            "database schema version 3 is newer than supported version 2",
         ):
             store.initialize()
 

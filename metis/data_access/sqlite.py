@@ -9,10 +9,12 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 from .contracts import (
+    ClassificationRecord,
     IntakeRecord,
     IntakeRegistrationResult,
     IntakeRegistrationStatus,
     StateStoreError,
+    StateTransitionRefused,
 )
 
 
@@ -29,10 +31,26 @@ INTAKE_COLUMNS = (
     "failure_reason",
     "trace_id",
 )
+CLASSIFICATION_COLUMNS = (
+    "classification_id",
+    "capture_id",
+    "candidate_type",
+    "sensitivity",
+    "confidence",
+    "routing",
+    "model_id",
+    "prompt_version",
+    "raw_response_path",
+    "created_at",
+)
 
 
 def _intake_record(row: tuple) -> IntakeRecord:
     return IntakeRecord(*row)
+
+
+def _classification_record(row: tuple) -> ClassificationRecord:
+    return ClassificationRecord(*row)
 
 
 class MigrationError(RuntimeError):
@@ -107,6 +125,33 @@ class SQLiteStateStore:
             raise StateStoreError(f"intake lookup failed: {error}") from error
         return None if row is None else _intake_record(row)
 
+    def find_intake_by_capture_id(
+        self,
+        capture_id: str,
+    ) -> Optional[IntakeRecord]:
+        """Return the intake row registered for a capture ID, if one exists."""
+        try:
+            row = self._select_intake_by_capture_id(self._connect(), capture_id)
+        except sqlite3.Error as error:
+            raise StateStoreError(f"intake lookup failed: {error}") from error
+        return None if row is None else _intake_record(row)
+
+    def find_classification_by_capture_id(
+        self,
+        capture_id: str,
+    ) -> Optional[ClassificationRecord]:
+        """Return the classification row for a capture ID, if one exists."""
+        try:
+            row = self._connect().execute(
+                "SELECT classification_id, capture_id, candidate_type, sensitivity, "
+                "confidence, routing, model_id, prompt_version, raw_response_path, "
+                "created_at FROM classification WHERE capture_id = ?",
+                (capture_id,),
+            ).fetchone()
+        except sqlite3.Error as error:
+            raise StateStoreError(f"classification lookup failed: {error}") from error
+        return None if row is None else _classification_record(row)
+
     def register_intake(self, record: IntakeRecord) -> IntakeRegistrationResult:
         """Register a captured intake row or return the exact existing duplicate."""
         connection: Optional[sqlite3.Connection] = None
@@ -138,6 +183,191 @@ class SQLiteStateStore:
             if connection is not None:
                 connection.rollback()
             raise StateStoreError(f"intake registration failed: {error}") from error
+
+    def begin_classification(
+        self,
+        capture_id: str,
+        started_at: str,
+    ) -> IntakeRecord:
+        """Move a captured or classification-failed intake to classifying."""
+        try:
+            connection = self._connect()
+        except sqlite3.Error as error:
+            raise StateStoreError(f"classification start failed: {error}") from error
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = self._select_intake_by_capture_id(connection, capture_id)
+            if row is None:
+                connection.rollback()
+                raise StateStoreError(
+                    f"classification start failed: intake not found: {capture_id}"
+                )
+            current = _intake_record(row)
+            eligible = current.state == "captured" or (
+                current.state == "failed"
+                and current.failure_reason is not None
+                and current.failure_reason.startswith("classification.")
+            )
+            if not eligible:
+                connection.rollback()
+                raise StateTransitionRefused(
+                    f"cannot begin classification from state {current.state}",
+                    current,
+                )
+
+            cursor = connection.execute(
+                "UPDATE intake SET state = 'classifying', state_updated_at = ?, "
+                "failure_reason = NULL WHERE capture_id = ? AND state = ? "
+                "AND failure_reason IS ?",
+                (
+                    started_at,
+                    capture_id,
+                    current.state,
+                    current.failure_reason,
+                ),
+            )
+            if cursor.rowcount != 1:
+                latest_row = self._select_intake_by_capture_id(connection, capture_id)
+                connection.rollback()
+                if latest_row is None:
+                    raise StateStoreError(
+                        f"classification start failed: intake disappeared: {capture_id}"
+                    )
+                raise StateTransitionRefused(
+                    "classification start lost its state comparison",
+                    _intake_record(latest_row),
+                )
+            updated_row = self._select_intake_by_capture_id(connection, capture_id)
+            if updated_row is None:
+                connection.rollback()
+                raise StateStoreError(
+                    f"classification start failed: intake disappeared: {capture_id}"
+                )
+            connection.commit()
+            return _intake_record(updated_row)
+        except (StateStoreError, StateTransitionRefused):
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        except sqlite3.Error as error:
+            if connection.in_transaction:
+                connection.rollback()
+            raise StateStoreError(f"classification start failed: {error}") from error
+
+    def complete_classification(
+        self,
+        record: ClassificationRecord,
+    ) -> ClassificationRecord:
+        """Persist a classification and its classified state in one transaction."""
+        try:
+            connection = self._connect()
+        except sqlite3.Error as error:
+            raise StateStoreError(
+                f"classification completion failed: {error}"
+            ) from error
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "INSERT INTO classification ("
+                "classification_id, capture_id, candidate_type, sensitivity, "
+                "confidence, routing, model_id, prompt_version, raw_response_path, "
+                "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                tuple(getattr(record, column) for column in CLASSIFICATION_COLUMNS),
+            )
+            cursor = connection.execute(
+                "UPDATE intake SET state = 'classified', state_updated_at = ?, "
+                "failure_reason = NULL WHERE capture_id = ? AND state = 'classifying'",
+                (record.created_at, record.capture_id),
+            )
+            if cursor.rowcount != 1:
+                current_row = self._select_intake_by_capture_id(
+                    connection, record.capture_id
+                )
+                connection.rollback()
+                if current_row is None:
+                    raise StateStoreError(
+                        "classification completion failed: intake not found: "
+                        f"{record.capture_id}"
+                    )
+                raise StateTransitionRefused(
+                    "classification completion requires state classifying",
+                    _intake_record(current_row),
+                )
+            connection.commit()
+            return record
+        except (StateStoreError, StateTransitionRefused):
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        except sqlite3.Error as error:
+            if connection.in_transaction:
+                connection.rollback()
+            raise StateStoreError(
+                f"classification completion failed: {error}"
+            ) from error
+
+    def record_classification_failure(
+        self,
+        capture_id: str,
+        reason: str,
+        failed_at: str,
+    ) -> IntakeRecord:
+        """Move a classifying intake to failed with a known reason."""
+        try:
+            connection = self._connect()
+        except sqlite3.Error as error:
+            raise StateStoreError(
+                f"classification failure recording failed: {error}"
+            ) from error
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                "UPDATE intake SET state = 'failed', state_updated_at = ?, "
+                "failure_reason = ? WHERE capture_id = ? AND state = 'classifying'",
+                (failed_at, reason, capture_id),
+            )
+            if cursor.rowcount != 1:
+                current_row = self._select_intake_by_capture_id(connection, capture_id)
+                connection.rollback()
+                if current_row is None:
+                    raise StateStoreError(
+                        f"classification failure recording failed: intake not found: {capture_id}"
+                    )
+                raise StateTransitionRefused(
+                    "classification failure recording requires state classifying",
+                    _intake_record(current_row),
+                )
+            updated_row = self._select_intake_by_capture_id(connection, capture_id)
+            if updated_row is None:
+                connection.rollback()
+                raise StateStoreError(
+                    "classification failure recording failed: intake disappeared: "
+                    f"{capture_id}"
+                )
+            connection.commit()
+            return _intake_record(updated_row)
+        except (StateStoreError, StateTransitionRefused):
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        except sqlite3.Error as error:
+            if connection.in_transaction:
+                connection.rollback()
+            raise StateStoreError(
+                f"classification failure recording failed: {error}"
+            ) from error
+
+    def _select_intake_by_capture_id(
+        self,
+        connection: sqlite3.Connection,
+        capture_id: str,
+    ) -> Optional[tuple]:
+        return connection.execute(
+            "SELECT capture_id, content_hash, captured_at, source_type, "
+            "evidence_path, state, state_updated_at, failure_reason, trace_id "
+            "FROM intake WHERE capture_id = ?",
+            (capture_id,),
+        ).fetchone()
 
     def _migrations(self) -> Tuple[Migration, ...]:
         if not self._migrations_directory.is_dir():
