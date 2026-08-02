@@ -43,6 +43,40 @@ class ClassificationRecord:
     created_at: str
 
 
+@dataclass(frozen=True)
+class ProposalReservationRecord:
+    proposal_id: str
+    capture_id: str
+    classification_id: str
+    lease_token: str
+    reserved_at: str
+    lease_expires_at: str
+
+
+@dataclass(frozen=True)
+class ProposalRecord:
+    proposal_id: str
+    capture_id: str
+    classification_id: str
+    note_type: str
+    title: str
+    body_path: str
+    proposed_links: str
+    evidence_refs: str
+    confidence: float
+    sensitivity: str
+    risk_level: str
+    reason: str
+    uncertainties_json: str
+    model_id: str
+    prompt_version: str
+    raw_response_path: str
+    content_hash: str
+    draft_note_path: Optional[str]
+    state: str
+    created_at: str
+
+
 class StateTransitionRefused(RuntimeError):
     """Raised when a known intake state does not allow a requested transition."""
 
@@ -112,3 +146,71 @@ class StateStore(Protocol):
         failed_at: str,
     ) -> IntakeRecord:
         """Move a classifying intake into a known failed state."""
+
+    def find_proposal_by_capture_id(
+        self,
+        capture_id: str,
+    ) -> Optional[ProposalRecord]:
+        """Return the proposal for a capture ID, if one exists."""
+
+    def find_proposal_reservation_by_capture_id(
+        self,
+        capture_id: str,
+    ) -> Optional[ProposalReservationRecord]:
+        """Return the active or recoverable reservation for a capture."""
+
+    def begin_proposal(
+        self,
+        reservation: ProposalReservationRecord,
+    ) -> ProposalReservationRecord:
+        """Atomically reserve an eligible classified intake."""
+
+    def reclaim_proposal(
+        self,
+        expected: ProposalReservationRecord,
+        replacement: ProposalReservationRecord,
+        reclaimed_at: str,
+    ) -> ProposalReservationRecord:
+        """Replace an expired reservation token and resume proposing."""
+
+    def record_proposal_failure(
+        self,
+        capture_id: str,
+        lease_token: str,
+        reason: str,
+        failed_at: str,
+    ) -> IntakeRecord:
+        """Record a known reservation-stage proposal failure."""
+
+    def complete_proposal(
+        self,
+        record: ProposalRecord,
+        lease_token: str,
+    ) -> ProposalRecord:
+        """Atomically persist a proposal and consume its reservation."""
+
+    def record_draft_failure(
+        self,
+        capture_id: str,
+        proposal_id: str,
+        reason: str,
+        failed_at: str,
+    ) -> IntakeRecord:
+        """Record a known failure after proposal persistence."""
+
+    def resume_proposal_draft(
+        self,
+        capture_id: str,
+        proposal_id: str,
+        resumed_at: str,
+    ) -> IntakeRecord:
+        """Restore a valid failed proposal to the proposed state."""
+
+    def register_proposal_draft(
+        self,
+        capture_id: str,
+        proposal_id: str,
+        draft_note_path: str,
+        registered_at: str,
+    ) -> ProposalRecord:
+        """Atomically register a draft and mark it awaiting approval."""

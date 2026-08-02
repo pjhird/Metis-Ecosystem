@@ -12,6 +12,8 @@ from metis.data_access import (
     IntakeRegistrationResult,
     IntakeRegistrationStatus,
     MigrationError,
+    ProposalRecord,
+    ProposalReservationRecord,
     SQLiteStateStore,
     StateStore,
 )
@@ -146,6 +148,66 @@ class FakeStateStore:
     def record_classification_failure(
         self, capture_id: str, reason: str, failed_at: str
     ) -> IntakeRecord:
+        raise NotImplementedError
+
+    def find_proposal_by_capture_id(
+        self, capture_id: str
+    ) -> ProposalRecord | None:
+        return None
+
+    def find_proposal_reservation_by_capture_id(
+        self, capture_id: str
+    ) -> ProposalReservationRecord | None:
+        return None
+
+    def begin_proposal(
+        self, reservation: ProposalReservationRecord
+    ) -> ProposalReservationRecord:
+        raise NotImplementedError
+
+    def reclaim_proposal(
+        self,
+        expected: ProposalReservationRecord,
+        replacement: ProposalReservationRecord,
+        reclaimed_at: str,
+    ) -> ProposalReservationRecord:
+        raise NotImplementedError
+
+    def record_proposal_failure(
+        self,
+        capture_id: str,
+        lease_token: str,
+        reason: str,
+        failed_at: str,
+    ) -> IntakeRecord:
+        raise NotImplementedError
+
+    def complete_proposal(
+        self, record: ProposalRecord, lease_token: str
+    ) -> ProposalRecord:
+        raise NotImplementedError
+
+    def record_draft_failure(
+        self,
+        capture_id: str,
+        proposal_id: str,
+        reason: str,
+        failed_at: str,
+    ) -> IntakeRecord:
+        raise NotImplementedError
+
+    def resume_proposal_draft(
+        self, capture_id: str, proposal_id: str, resumed_at: str
+    ) -> IntakeRecord:
+        raise NotImplementedError
+
+    def register_proposal_draft(
+        self,
+        capture_id: str,
+        proposal_id: str,
+        draft_note_path: str,
+        registered_at: str,
+    ) -> ProposalRecord:
         raise NotImplementedError
 
 

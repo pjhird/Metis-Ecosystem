@@ -13,6 +13,8 @@ from .contracts import (
     IntakeRecord,
     IntakeRegistrationResult,
     IntakeRegistrationStatus,
+    ProposalRecord,
+    ProposalReservationRecord,
     StateStoreError,
     StateTransitionRefused,
 )
@@ -43,6 +45,36 @@ CLASSIFICATION_COLUMNS = (
     "raw_response_path",
     "created_at",
 )
+PROPOSAL_COLUMNS = (
+    "proposal_id",
+    "capture_id",
+    "classification_id",
+    "note_type",
+    "title",
+    "body_path",
+    "proposed_links",
+    "evidence_refs",
+    "confidence",
+    "sensitivity",
+    "risk_level",
+    "reason",
+    "uncertainties_json",
+    "model_id",
+    "prompt_version",
+    "raw_response_path",
+    "content_hash",
+    "draft_note_path",
+    "state",
+    "created_at",
+)
+PROPOSAL_RESERVATION_COLUMNS = (
+    "proposal_id",
+    "capture_id",
+    "classification_id",
+    "lease_token",
+    "reserved_at",
+    "lease_expires_at",
+)
 
 
 def _intake_record(row: tuple) -> IntakeRecord:
@@ -51,6 +83,14 @@ def _intake_record(row: tuple) -> IntakeRecord:
 
 def _classification_record(row: tuple) -> ClassificationRecord:
     return ClassificationRecord(*row)
+
+
+def _proposal_record(row: tuple) -> ProposalRecord:
+    return ProposalRecord(*row)
+
+
+def _proposal_reservation_record(row: tuple) -> ProposalReservationRecord:
+    return ProposalReservationRecord(*row)
 
 
 class MigrationError(RuntimeError):
@@ -151,6 +191,34 @@ class SQLiteStateStore:
         except sqlite3.Error as error:
             raise StateStoreError(f"classification lookup failed: {error}") from error
         return None if row is None else _classification_record(row)
+
+    def find_proposal_by_capture_id(
+        self,
+        capture_id: str,
+    ) -> Optional[ProposalRecord]:
+        """Return the proposal row for a capture ID, if one exists."""
+        try:
+            row = self._select_proposal_by_capture_id(
+                self._connect(),
+                capture_id,
+            )
+        except sqlite3.Error as error:
+            raise StateStoreError(f"proposal lookup failed: {error}") from error
+        return None if row is None else _proposal_record(row)
+
+    def find_proposal_reservation_by_capture_id(
+        self,
+        capture_id: str,
+    ) -> Optional[ProposalReservationRecord]:
+        """Return the proposal reservation for a capture ID, if one exists."""
+        try:
+            row = self._select_reservation_by_capture_id(
+                self._connect(),
+                capture_id,
+            )
+        except sqlite3.Error as error:
+            raise StateStoreError(f"proposal reservation lookup failed: {error}") from error
+        return None if row is None else _proposal_reservation_record(row)
 
     def register_intake(self, record: IntakeRecord) -> IntakeRegistrationResult:
         """Register a captured intake row or return the exact existing duplicate."""
@@ -361,6 +429,531 @@ class SQLiteStateStore:
             raise StateStoreError(
                 f"classification failure recording failed: {error}"
             ) from error
+
+    def begin_proposal(
+        self,
+        reservation: ProposalReservationRecord,
+    ) -> ProposalReservationRecord:
+        """Reserve a classified intake and enter proposing atomically."""
+        connection = self._proposal_connection("proposal start")
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            current = self._required_intake(connection, reservation.capture_id)
+            classification = connection.execute(
+                "SELECT classification_id FROM classification WHERE capture_id = ?",
+                (reservation.capture_id,),
+            ).fetchone()
+            if (
+                current.state != "classified"
+                or current.failure_reason is not None
+                or classification != (reservation.classification_id,)
+            ):
+                connection.rollback()
+                raise StateTransitionRefused(
+                    f"cannot begin proposal from state {current.state}",
+                    current,
+                )
+            connection.execute(
+                "INSERT INTO proposal_reservation ("
+                "proposal_id, capture_id, classification_id, lease_token, "
+                "reserved_at, lease_expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+                tuple(
+                    getattr(reservation, column)
+                    for column in PROPOSAL_RESERVATION_COLUMNS
+                ),
+            )
+            cursor = connection.execute(
+                "UPDATE intake SET state = 'proposing', state_updated_at = ?, "
+                "failure_reason = NULL WHERE capture_id = ? AND state = 'classified' "
+                "AND failure_reason IS NULL AND state_updated_at = ?",
+                (
+                    reservation.reserved_at,
+                    reservation.capture_id,
+                    current.state_updated_at,
+                ),
+            )
+            if cursor.rowcount != 1:
+                connection.rollback()
+                raise StateTransitionRefused(
+                    "proposal start lost its state comparison",
+                    current,
+                )
+            connection.commit()
+            return reservation
+        except (StateStoreError, StateTransitionRefused):
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        except sqlite3.IntegrityError as error:
+            if connection.in_transaction:
+                connection.rollback()
+            current = self.find_intake_by_capture_id(reservation.capture_id)
+            if current is not None:
+                raise StateTransitionRefused(
+                    "proposal reservation already exists or conflicts",
+                    current,
+                ) from error
+            raise StateStoreError(f"proposal start failed: {error}") from error
+        except sqlite3.Error as error:
+            if connection.in_transaction:
+                connection.rollback()
+            raise StateStoreError(f"proposal start failed: {error}") from error
+
+    def reclaim_proposal(
+        self,
+        expected: ProposalReservationRecord,
+        replacement: ProposalReservationRecord,
+        reclaimed_at: str,
+    ) -> ProposalReservationRecord:
+        """Replace an expired reservation token and resume proposing."""
+        if (
+            expected.proposal_id != replacement.proposal_id
+            or expected.capture_id != replacement.capture_id
+            or expected.classification_id != replacement.classification_id
+            or expected.lease_token == replacement.lease_token
+        ):
+            raise StateStoreError("proposal reclaim identities are inconsistent")
+        connection = self._proposal_connection("proposal reclaim")
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            current = self._required_intake(connection, expected.capture_id)
+            row = self._select_reservation_by_capture_id(
+                connection,
+                expected.capture_id,
+            )
+            reservation = (
+                None if row is None else _proposal_reservation_record(row)
+            )
+            retryable_state = current.state == "proposing" or (
+                current.state == "failed"
+                and current.failure_reason is not None
+                and current.failure_reason.startswith("proposal.")
+            )
+            if (
+                reservation != expected
+                or not retryable_state
+                or expected.lease_expires_at > reclaimed_at
+            ):
+                connection.rollback()
+                raise StateTransitionRefused(
+                    "proposal reservation is active or no longer matches",
+                    current,
+                )
+            cursor = connection.execute(
+                "UPDATE proposal_reservation SET lease_token = ?, reserved_at = ?, "
+                "lease_expires_at = ? WHERE proposal_id = ? AND capture_id = ? "
+                "AND classification_id = ? AND lease_token = ? AND reserved_at = ? "
+                "AND lease_expires_at = ?",
+                (
+                    replacement.lease_token,
+                    replacement.reserved_at,
+                    replacement.lease_expires_at,
+                    expected.proposal_id,
+                    expected.capture_id,
+                    expected.classification_id,
+                    expected.lease_token,
+                    expected.reserved_at,
+                    expected.lease_expires_at,
+                ),
+            )
+            if cursor.rowcount != 1:
+                connection.rollback()
+                raise StateTransitionRefused(
+                    "proposal reclaim lost its reservation comparison",
+                    current,
+                )
+            cursor = connection.execute(
+                "UPDATE intake SET state = 'proposing', state_updated_at = ?, "
+                "failure_reason = NULL WHERE capture_id = ? AND state = ? "
+                "AND failure_reason IS ? AND state_updated_at = ?",
+                (
+                    replacement.reserved_at,
+                    expected.capture_id,
+                    current.state,
+                    current.failure_reason,
+                    current.state_updated_at,
+                ),
+            )
+            if cursor.rowcount != 1:
+                connection.rollback()
+                raise StateTransitionRefused(
+                    "proposal reclaim lost its state comparison",
+                    current,
+                )
+            connection.commit()
+            return replacement
+        except (StateStoreError, StateTransitionRefused):
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        except sqlite3.Error as error:
+            if connection.in_transaction:
+                connection.rollback()
+            raise StateStoreError(f"proposal reclaim failed: {error}") from error
+
+    def record_proposal_failure(
+        self,
+        capture_id: str,
+        lease_token: str,
+        reason: str,
+        failed_at: str,
+    ) -> IntakeRecord:
+        """Fail a proposing intake while retaining an expired reservation."""
+        if not reason.startswith("proposal."):
+            raise StateStoreError("proposal failure reason is outside its namespace")
+        connection = self._proposal_connection("proposal failure recording")
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            current = self._required_intake(connection, capture_id)
+            reservation_row = self._select_reservation_by_capture_id(
+                connection,
+                capture_id,
+            )
+            reservation = (
+                None
+                if reservation_row is None
+                else _proposal_reservation_record(reservation_row)
+            )
+            if (
+                current.state != "proposing"
+                or reservation is None
+                or reservation.lease_token != lease_token
+            ):
+                connection.rollback()
+                raise StateTransitionRefused(
+                    "proposal failure requires the current proposing lease",
+                    current,
+                )
+            cursor = connection.execute(
+                "UPDATE proposal_reservation SET lease_expires_at = ? "
+                "WHERE capture_id = ? AND lease_token = ?",
+                (failed_at, capture_id, lease_token),
+            )
+            if cursor.rowcount != 1:
+                connection.rollback()
+                raise StateTransitionRefused(
+                    "proposal failure lost its lease comparison",
+                    current,
+                )
+            cursor = connection.execute(
+                "UPDATE intake SET state = 'failed', state_updated_at = ?, "
+                "failure_reason = ? WHERE capture_id = ? AND state = 'proposing' "
+                "AND state_updated_at = ?",
+                (failed_at, reason, capture_id, current.state_updated_at),
+            )
+            if cursor.rowcount != 1:
+                connection.rollback()
+                raise StateTransitionRefused(
+                    "proposal failure lost its state comparison",
+                    current,
+                )
+            updated = self._required_intake(connection, capture_id)
+            connection.commit()
+            return updated
+        except (StateStoreError, StateTransitionRefused):
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        except sqlite3.Error as error:
+            if connection.in_transaction:
+                connection.rollback()
+            raise StateStoreError(
+                f"proposal failure recording failed: {error}"
+            ) from error
+
+    def complete_proposal(
+        self,
+        record: ProposalRecord,
+        lease_token: str,
+    ) -> ProposalRecord:
+        """Persist a proposal, consume its reservation, and enter proposed."""
+        connection = self._proposal_connection("proposal completion")
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            current = self._required_intake(connection, record.capture_id)
+            reservation_row = self._select_reservation_by_capture_id(
+                connection,
+                record.capture_id,
+            )
+            reservation = (
+                None
+                if reservation_row is None
+                else _proposal_reservation_record(reservation_row)
+            )
+            if (
+                current.state != "proposing"
+                or current.failure_reason is not None
+                or reservation is None
+                or reservation.proposal_id != record.proposal_id
+                or reservation.classification_id != record.classification_id
+                or reservation.lease_token != lease_token
+            ):
+                connection.rollback()
+                raise StateTransitionRefused(
+                    "proposal completion requires the current proposing lease",
+                    current,
+                )
+            connection.execute(
+                "INSERT INTO proposal ("
+                "proposal_id, capture_id, classification_id, note_type, title, "
+                "body_path, proposed_links, evidence_refs, confidence, sensitivity, "
+                "risk_level, reason, uncertainties_json, model_id, prompt_version, "
+                "raw_response_path, content_hash, draft_note_path, state, created_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                tuple(getattr(record, column) for column in PROPOSAL_COLUMNS),
+            )
+            deleted = connection.execute(
+                "DELETE FROM proposal_reservation WHERE capture_id = ? "
+                "AND proposal_id = ? AND lease_token = ?",
+                (record.capture_id, record.proposal_id, lease_token),
+            )
+            if deleted.rowcount != 1:
+                connection.rollback()
+                raise StateTransitionRefused(
+                    "proposal completion lost its lease comparison",
+                    current,
+                )
+            cursor = connection.execute(
+                "UPDATE intake SET state = 'proposed', state_updated_at = ?, "
+                "failure_reason = NULL WHERE capture_id = ? AND state = 'proposing' "
+                "AND state_updated_at = ?",
+                (record.created_at, record.capture_id, current.state_updated_at),
+            )
+            if cursor.rowcount != 1:
+                connection.rollback()
+                raise StateTransitionRefused(
+                    "proposal completion lost its state comparison",
+                    current,
+                )
+            connection.commit()
+            return record
+        except (StateStoreError, StateTransitionRefused):
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        except sqlite3.Error as error:
+            if connection.in_transaction:
+                connection.rollback()
+            raise StateStoreError(f"proposal completion failed: {error}") from error
+
+    def record_draft_failure(
+        self,
+        capture_id: str,
+        proposal_id: str,
+        reason: str,
+        failed_at: str,
+    ) -> IntakeRecord:
+        """Fail an intake after its proposal row was safely persisted."""
+        if not reason.startswith("proposal."):
+            raise StateStoreError("draft failure reason is outside proposal namespace")
+        connection = self._proposal_connection("draft failure recording")
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            current = self._required_intake(connection, capture_id)
+            proposal_row = self._select_proposal_by_capture_id(connection, capture_id)
+            proposal = None if proposal_row is None else _proposal_record(proposal_row)
+            if (
+                current.state != "proposed"
+                or current.failure_reason is not None
+                or proposal is None
+                or proposal.proposal_id != proposal_id
+                or proposal.draft_note_path is not None
+            ):
+                connection.rollback()
+                raise StateTransitionRefused(
+                    "draft failure requires an unregistered proposed draft",
+                    current,
+                )
+            cursor = connection.execute(
+                "UPDATE intake SET state = 'failed', state_updated_at = ?, "
+                "failure_reason = ? WHERE capture_id = ? AND state = 'proposed' "
+                "AND state_updated_at = ?",
+                (failed_at, reason, capture_id, current.state_updated_at),
+            )
+            if cursor.rowcount != 1:
+                connection.rollback()
+                raise StateTransitionRefused(
+                    "draft failure lost its state comparison",
+                    current,
+                )
+            updated = self._required_intake(connection, capture_id)
+            connection.commit()
+            return updated
+        except (StateStoreError, StateTransitionRefused):
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        except sqlite3.Error as error:
+            if connection.in_transaction:
+                connection.rollback()
+            raise StateStoreError(
+                f"draft failure recording failed: {error}"
+            ) from error
+
+    def resume_proposal_draft(
+        self,
+        capture_id: str,
+        proposal_id: str,
+        resumed_at: str,
+    ) -> IntakeRecord:
+        """Restore a valid proposal-stage failure to proposed."""
+        connection = self._proposal_connection("proposal draft resume")
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            current = self._required_intake(connection, capture_id)
+            proposal_row = self._select_proposal_by_capture_id(connection, capture_id)
+            proposal = None if proposal_row is None else _proposal_record(proposal_row)
+            reservation = self._select_reservation_by_capture_id(connection, capture_id)
+            if (
+                current.state != "failed"
+                or current.failure_reason is None
+                or not current.failure_reason.startswith("proposal.")
+                or proposal is None
+                or proposal.proposal_id != proposal_id
+                or proposal.draft_note_path is not None
+                or reservation is not None
+            ):
+                connection.rollback()
+                raise StateTransitionRefused(
+                    "proposal draft resume requires a valid proposal failure",
+                    current,
+                )
+            cursor = connection.execute(
+                "UPDATE intake SET state = 'proposed', state_updated_at = ?, "
+                "failure_reason = NULL WHERE capture_id = ? AND state = 'failed' "
+                "AND failure_reason = ? AND state_updated_at = ?",
+                (
+                    resumed_at,
+                    capture_id,
+                    current.failure_reason,
+                    current.state_updated_at,
+                ),
+            )
+            if cursor.rowcount != 1:
+                connection.rollback()
+                raise StateTransitionRefused(
+                    "proposal draft resume lost its state comparison",
+                    current,
+                )
+            updated = self._required_intake(connection, capture_id)
+            connection.commit()
+            return updated
+        except (StateStoreError, StateTransitionRefused):
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        except sqlite3.Error as error:
+            if connection.in_transaction:
+                connection.rollback()
+            raise StateStoreError(f"proposal draft resume failed: {error}") from error
+
+    def register_proposal_draft(
+        self,
+        capture_id: str,
+        proposal_id: str,
+        draft_note_path: str,
+        registered_at: str,
+    ) -> ProposalRecord:
+        """Register an exact draft and enter awaiting approval atomically."""
+        connection = self._proposal_connection("proposal draft registration")
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            current = self._required_intake(connection, capture_id)
+            proposal_row = self._select_proposal_by_capture_id(connection, capture_id)
+            proposal = None if proposal_row is None else _proposal_record(proposal_row)
+            if (
+                current.state != "proposed"
+                or current.failure_reason is not None
+                or proposal is None
+                or proposal.proposal_id != proposal_id
+                or proposal.draft_note_path is not None
+            ):
+                connection.rollback()
+                raise StateTransitionRefused(
+                    "draft registration requires an unregistered proposed draft",
+                    current,
+                )
+            cursor = connection.execute(
+                "UPDATE proposal SET draft_note_path = ? WHERE proposal_id = ? "
+                "AND capture_id = ? AND draft_note_path IS NULL",
+                (draft_note_path, proposal_id, capture_id),
+            )
+            if cursor.rowcount != 1:
+                connection.rollback()
+                raise StateTransitionRefused(
+                    "draft registration lost its proposal comparison",
+                    current,
+                )
+            cursor = connection.execute(
+                "UPDATE intake SET state = 'awaiting_approval', state_updated_at = ?, "
+                "failure_reason = NULL WHERE capture_id = ? AND state = 'proposed' "
+                "AND state_updated_at = ?",
+                (registered_at, capture_id, current.state_updated_at),
+            )
+            if cursor.rowcount != 1:
+                connection.rollback()
+                raise StateTransitionRefused(
+                    "draft registration lost its state comparison",
+                    current,
+                )
+            updated_row = self._select_proposal_by_capture_id(connection, capture_id)
+            if updated_row is None:
+                connection.rollback()
+                raise StateStoreError("registered proposal disappeared")
+            updated = _proposal_record(updated_row)
+            connection.commit()
+            return updated
+        except (StateStoreError, StateTransitionRefused):
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        except sqlite3.Error as error:
+            if connection.in_transaction:
+                connection.rollback()
+            raise StateStoreError(
+                f"proposal draft registration failed: {error}"
+            ) from error
+    def _proposal_connection(self, operation: str) -> sqlite3.Connection:
+        try:
+            return self._connect()
+        except sqlite3.Error as error:
+            raise StateStoreError(f"{operation} failed: {error}") from error
+
+    def _required_intake(
+        self,
+        connection: sqlite3.Connection,
+        capture_id: str,
+    ) -> IntakeRecord:
+        row = self._select_intake_by_capture_id(connection, capture_id)
+        if row is None:
+            raise StateStoreError(f"intake not found: {capture_id}")
+        return _intake_record(row)
+
+    def _select_proposal_by_capture_id(
+        self,
+        connection: sqlite3.Connection,
+        capture_id: str,
+    ) -> Optional[tuple]:
+        return connection.execute(
+            "SELECT proposal_id, capture_id, classification_id, note_type, title, "
+            "body_path, proposed_links, evidence_refs, confidence, sensitivity, "
+            "risk_level, reason, uncertainties_json, model_id, prompt_version, "
+            "raw_response_path, content_hash, draft_note_path, state, created_at "
+            "FROM proposal WHERE capture_id = ?",
+            (capture_id,),
+        ).fetchone()
+
+    def _select_reservation_by_capture_id(
+        self,
+        connection: sqlite3.Connection,
+        capture_id: str,
+    ) -> Optional[tuple]:
+        return connection.execute(
+            "SELECT proposal_id, capture_id, classification_id, lease_token, "
+            "reserved_at, lease_expires_at FROM proposal_reservation "
+            "WHERE capture_id = ?",
+            (capture_id,),
+        ).fetchone()
 
     def _select_intake_by_capture_id(
         self,
