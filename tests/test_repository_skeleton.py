@@ -18,6 +18,7 @@ class RepositorySkeletonTests(unittest.TestCase):
             "evidence/capture/raw.txt",
             "classification-evidence/classification/raw-response.txt",
             "proposal-evidence/proposal/raw-response.txt",
+            "proposal-content/proposal/body.md",
             "vault/notes/filed/note.md",
             "metis/__pycache__/module.cpython-39.pyc",
             ".coverage",
