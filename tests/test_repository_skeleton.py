@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import unittest
 from pathlib import Path
@@ -43,6 +44,44 @@ class RepositorySkeletonTests(unittest.TestCase):
         self.assertLessEqual(
             len((REPOSITORY_ROOT / "AGENTS.md").read_text().splitlines()),
             200,
+        )
+
+    def test_pull_request_ci_workflow_contract(self) -> None:
+        workflow_path = (
+            REPOSITORY_ROOT / ".github" / "workflows" / "metis-tests.yml"
+        )
+        self.assertTrue(workflow_path.is_file(), "pull-request CI workflow is missing")
+
+        workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(
+            workflow,
+            {
+                "name": "Metis tests",
+                "on": {"pull_request": {"branches": ["main"]}},
+                "permissions": {"contents": "read"},
+                "jobs": {
+                    "tests": {
+                        "name": "metis/tests",
+                        "runs-on": "ubuntu-latest",
+                        "steps": [
+                            {
+                                "name": "Check out repository",
+                                "uses": "actions/checkout@v4",
+                            },
+                            {
+                                "name": "Set up Python",
+                                "uses": "actions/setup-python@v5",
+                                "with": {"python-version": "3.13"},
+                            },
+                            {
+                                "name": "Run test suite",
+                                "run": "python -m unittest discover -s tests -v",
+                            },
+                        ],
+                    }
+                },
+            },
         )
 
 
