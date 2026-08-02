@@ -138,6 +138,10 @@ class ApprovalServiceTests(unittest.TestCase):
             )
         )
 
+    def _set_draft_links(self, block: bytes, capture_id: str = CAPTURE_ID) -> None:
+        path = self.root / f"vault/notes/proposed/note.{capture_id}.md"
+        path.write_bytes(path.read_bytes().replace(b"links: []\n", block, 1))
+
     def _vault_snapshot(self) -> dict[str, bytes]:
         vault = self.root / "vault"
         return {
@@ -178,6 +182,54 @@ class ApprovalServiceTests(unittest.TestCase):
             "approved",
         )
         self.assertFalse((self.root / "vault" / "notes" / "filed").exists())
+
+    def test_hand_authored_links_are_approved_and_reported(self) -> None:
+        self._awaiting_approval()
+        self._set_draft_links(
+            b'links:\n  - "[[goal.health-baseline]]"\n  - "[[proj.metis-core]]"\n'
+        )
+        self._set_draft_status("approved")
+
+        run = self._service().review()
+
+        decision = run.decisions[0]
+        self.assertEqual(run.status, ApprovalRunStatus.COMPLETED)
+        self.assertEqual(decision.status, ApprovalStatus.APPROVED)
+        self.assertEqual(
+            decision.observed_links,
+            ("goal.health-baseline", "proj.metis-core"),
+        )
+        self.assertEqual(len(approval_rows(self.store)), 1)
+        self.assertEqual(
+            self.store.find_intake_by_capture_id(CAPTURE_ID).state,
+            "approved",
+        )
+
+    def test_links_added_without_a_status_change_stay_pending(self) -> None:
+        self._awaiting_approval()
+        self._set_draft_links(b'links:\n  - "[[goal.health-baseline]]"\n')
+
+        run = self._service().review()
+
+        self.assertEqual(run.decisions[0].status, ApprovalStatus.PENDING)
+        self.assertEqual(run.decisions[0].observed_links, ("goal.health-baseline",))
+        self.assertEqual(table_row_count(self.store, "approval"), 0)
+
+    def test_malformed_links_fail_closed_without_recording(self) -> None:
+        self._awaiting_approval()
+        self._set_draft_links(b'links:\n  - "[[goal one]]"\n')
+        self._set_draft_status("approved")
+
+        run = self._service().review()
+
+        self.assertEqual(run.status, ApprovalRunStatus.FAILED)
+        self.assertEqual(run.decisions[0].reason, "approval_draft_inconsistent")
+        self.assertEqual(run.decisions[0].observed_links, ())
+        self.assertEqual(table_row_count(self.store, "approval"), 0)
+        self.assertEqual(
+            self.store.find_intake_by_capture_id(CAPTURE_ID).state,
+            "awaiting_approval",
+        )
 
     def test_rejected_status_is_a_recorded_successful_outcome(self) -> None:
         self._awaiting_approval()

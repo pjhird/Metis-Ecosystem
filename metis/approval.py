@@ -21,9 +21,10 @@ from .identifiers import is_ulid, new_ulid
 from .proposal_content import ProposalContentError, ProposalContentStore
 
 
-# ponytail: one local owner, no authentication anywhere in the system, and the
-# vault cannot carry identity without breaking the single-editable-field
-# invariant. Replace when authenticated or multi-user identity exists.
+# ponytail: one local owner, no authentication anywhere in the system, and a
+# human-typed approver in the vault would be self-certification, not identity
+# (ADR-020 fixes the editable fields at status and links). Replace when
+# authenticated or multi-user identity exists.
 APPROVER = "human:owner"
 
 
@@ -47,6 +48,7 @@ class ApprovalResult:
     approval_id: Optional[str]
     decision: Optional[str]
     observed_status: Optional[str]
+    observed_links: Tuple[str, ...]
     approver: Optional[str]
     draft_path: Optional[str]
     intake_state: Optional[str]
@@ -143,7 +145,8 @@ class ApprovalService:
                 intake,
                 proposal,
                 "approval_draft_inconsistent",
-                "the draft is missing or was edited outside its status field",
+                "the draft is missing, edited outside status and links, "
+                "or carries a malformed link",
             )
         observed = draft.observed_status.value
         if observed == "proposed":
@@ -154,6 +157,7 @@ class ApprovalService:
                 approval_id=None,
                 decision=None,
                 observed_status=observed,
+                observed_links=draft.observed_links,
                 approver=None,
                 draft_path=proposal.draft_note_path,
                 intake_state=intake.state,
@@ -161,13 +165,14 @@ class ApprovalService:
                 reason=None,
                 message="the draft is still awaiting a human decision",
             )
-        return self._record(intake, proposal, observed)
+        return self._record(intake, proposal, observed, draft.observed_links)
 
     def _record(
         self,
         intake: IntakeRecord,
         proposal: ProposalRecord,
         observed: str,
+        links: Tuple[str, ...],
     ) -> ApprovalResult:
         try:
             approval_id = self._id_factory()
@@ -225,6 +230,7 @@ class ApprovalService:
             approval_id=approval_id,
             decision=observed,
             observed_status=observed,
+            observed_links=links,
             approver=APPROVER,
             draft_path=proposal.draft_note_path,
             intake_state=updated.state,
@@ -281,6 +287,7 @@ class ApprovalService:
             approval_id=None,
             decision=None,
             observed_status=None,
+            observed_links=(),
             approver=None,
             draft_path=None if proposal is None else proposal.draft_note_path,
             intake_state=intake.state,

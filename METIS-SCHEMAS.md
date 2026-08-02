@@ -316,8 +316,13 @@ links:
 
 Rules:
 
-- `status` is the **only** field a human edits to authorize a change (ADR-005). Everything else is written by
-  the system.
+- A draft has exactly **two** human-editable fields, `status` and `links` (ADR-020). Everything else is
+  written by the system and is byte-exact; the draft store refuses a draft that differs anywhere else.
+- `status` is the only field that **authorizes** a change (ADR-005). `links` supplies content and authorizes
+  nothing, so there is still exactly one approval surface.
+- `links` is either `links: []` or `links:` followed by one or more `  - "[[target]]"` lines. Targets are
+  restricted to `[A-Za-z0-9._-]+`, must be unique, and are typed by the human — Metis does not create goal or
+  project notes and never proposes a link.
 - `capture_id` and `evidence` are mandatory — a note without provenance is invalid (REQ-VLT-004).
 - `verification` is separate from `status`. Approving that a note should exist is not the same as verifying
   its content is true (REQ-DATA-005).

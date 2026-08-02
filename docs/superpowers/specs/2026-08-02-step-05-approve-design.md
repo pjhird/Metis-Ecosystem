@@ -5,7 +5,7 @@
 - Build-order step: 5 — Approve
 - Implementation status: in progress
 - Base: verified `main` at merge commit `5b3cd46` (step 4 merged)
-- Governing decisions: ADR-004, ADR-005, ADR-006, ADR-007, ADR-002, ADR-014, ADR-019
+- Governing decisions: ADR-002, ADR-004, ADR-005, ADR-006, ADR-007, ADR-014, ADR-019, ADR-020
 - Primary requirements: REQ-GOV-004, REQ-VLT-003, REQ-ORCH-001, REQ-INTK-005, REQ-TEST-003
 
 ## 1. Objective
@@ -31,6 +31,7 @@ no permanent note.
   with the matching `proposal.state` change in one transaction.
 - Migration `004` — mechanical one-approval-per-proposal uniqueness.
 - Illegal-edge tests for every intake state that must not produce an approval.
+- The two-field draft contract from ADR-020: `status` and `links` are human-editable, nothing else is.
 
 ### Excluded
 
@@ -43,12 +44,24 @@ no permanent note.
 
 ## 3. The approval signal
 
-`status` in the draft's YAML frontmatter is the sole signal (ADR-005). Step 5 reads it through the
-existing `DraftNoteStore.validate(path, expected_proposed_bytes)`, which already renders the three legal
-status variants of the exact expected bytes and requires precisely one to match. A draft edited anywhere
-outside that one field matches none, raises `DraftNoteConsistencyError`, and fails closed.
+`status` in the draft's YAML frontmatter is the sole approval signal (ADR-005). Step 5 reads it through
+`DraftNoteStore.validate(path, expected_proposed_bytes)`.
 
-No new frontmatter parser is written, and no YAML dependency is added.
+Per ADR-020 a draft has two human-editable fields, `status` and `links`, so `validate` matches two variable
+regions and requires every other byte to be exact:
+
+- the frontmatter head must equal exactly one of the three rendered `status` variants;
+- the trailing links region must be `links: []` or `links:` followed by `  - "[[target]]"` lines, with
+  targets restricted to `[A-Za-z0-9._-]+` and no duplicates;
+- everything after the frontmatter — the body — must match byte-for-byte.
+
+`render_proposed_draft` emits `links: []` as the last line of the frontmatter, so the editable region is a
+clean suffix and the split needs no YAML parser. A draft edited anywhere else, or carrying a malformed link,
+raises `DraftNoteConsistencyError` and fails closed. `links: []` in the *body* is not a frontmatter field —
+the split is frontmatter-scoped and tested.
+
+`links` supplies content; it does not authorize. Step 5 reports the observed links in its result and records
+no link data in the database. Resolving them against existing goal and project notes is Step 6.
 
 ## 4. The queue is driven by operational state, not the filesystem
 
@@ -66,7 +79,8 @@ never matched, and can never produce an approval record. This is the evidence RE
 2. `proposal-content/<proposal_id>/` validates and its identities and `content_hash` agree with the row.
 3. The canonical body bytes hash to `proposal.content_hash`.
 4. `render_proposed_draft(proposal, body)` reproduces the expected draft bytes.
-5. `DraftNoteStore.validate` matches the observed file to exactly one status variant.
+5. `DraftNoteStore.validate` matches the observed file to exactly one status variant and a
+   well-formed links region, with every other byte exact.
 
 Any disagreement is a determinate failure with a visible review item. Nothing is repaired.
 
@@ -85,9 +99,9 @@ must:
 ## 6. Approver identity
 
 Nothing in the system distinguishes people: there is no authentication, no accounts, one local owner.
-Identity cannot come from the vault — a frontmatter `approver` field would be human-editable and would
-break the single-editable-field invariant that makes the status read trustworthy. A `--approver` flag
-would let whoever runs the command type any name, which is no stronger than a constant.
+Identity cannot come from the vault — a frontmatter `approver` field would have to become a third
+human-editable field, and a human-typed approver name is self-certification, not identity. A `--approver`
+flag would let whoever runs the command type any name, which is no stronger than a constant.
 
 Step 5 therefore records the module constant `human:owner`, satisfying the existing
 `CHECK (approver LIKE 'human:%')`. Upgrade trigger: authenticated or multi-user identity exists.
@@ -152,4 +166,11 @@ status equals the decision; and `committed_at` and `revoked_at` are `NULL`.
 - `test_approval_requires_a_registered_pending_proposal`
 - `test_duplicate_approval_is_refused_by_sqlite`
 - `test_approval_proposal_is_unique` (migration)
-- `test_capture_classify_propose_approve_stops_before_filing` (integration)
+- `test_capture_classify_propose_approve_stops_before_filing` (integration, hand-authored link)
+- `test_human_added_links_are_accepted_alongside_the_status_edit`
+- `test_links_are_editable_without_a_status_change`
+- `test_links_like_body_lines_are_not_frontmatter_fields`
+- `test_malformed_links_block_fails_closed`
+- `test_edits_outside_status_and_links_are_still_refused_when_linked`
+- `test_hand_authored_links_are_approved_and_reported`
+- `test_malformed_links_fail_closed_without_recording`

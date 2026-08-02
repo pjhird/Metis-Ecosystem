@@ -29,11 +29,22 @@ class ApprovalIntegrationTests(unittest.TestCase):
             self.assertEqual(len(pending["decisions"]), 1)
             self.assertEqual(pending["decisions"][0]["status"], "pending")
 
+            # The owner hand-authors a goal, links the draft to it, then approves.
+            goal = root / "vault" / "goals" / "goal.health-baseline.md"
+            goal.parent.mkdir(parents=True, exist_ok=True)
+            goal.write_bytes(
+                b"---\nid: goal.health-baseline\ntype: goal\n"
+                b"title: Establish a health baseline\nstatus: active\n"
+                b"horizon: annual\ncreated: 2026-08-02\n---\n"
+            )
             draft = root / proposed["draft_path"]
             before = draft.read_bytes()
-            draft.write_bytes(
-                before.replace(b"status: proposed\n", b"status: approved\n", 1)
-            )
+            edited = before.replace(
+                b"links: []\n",
+                b'links:\n  - "[[goal.health-baseline]]"\n',
+                1,
+            ).replace(b"status: proposed\n", b"status: approved\n", 1)
+            draft.write_bytes(edited)
 
             approved = self._run(root, adapter, ["approvals"])
             replayed = self._run(root, adapter, ["approvals"])
@@ -46,6 +57,7 @@ class ApprovalIntegrationTests(unittest.TestCase):
             self.assertEqual(decision["approver"], "human:owner")
             self.assertEqual(decision["intake_state"], "approved")
             self.assertEqual(decision["proposal_id"], proposed["proposal_id"])
+            self.assertEqual(decision["observed_links"], ["goal.health-baseline"])
             self.assertEqual(replayed["decisions"], [])
             self.assertEqual(adapter.classification_calls, 1)
             self.assertEqual(adapter.proposal_calls, 1)
@@ -66,10 +78,7 @@ class ApprovalIntegrationTests(unittest.TestCase):
                 self.assertEqual(table_row_count(store, "approval"), 1)
                 self.assertEqual(table_row_count(store, "audit_event"), 0)
 
-            self.assertEqual(
-                draft.read_bytes(),
-                before.replace(b"status: proposed\n", b"status: approved\n", 1),
-            )
+            self.assertEqual(draft.read_bytes(), edited)
             self.assertFalse((root / "vault" / "notes" / "filed").exists())
             self.assertEqual(
                 len(list((root / "vault" / "notes" / "proposed").iterdir())),
