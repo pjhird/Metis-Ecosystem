@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, Protocol, runtime_checkable
+from typing import Optional, Protocol, Tuple, runtime_checkable
 
 
 class StateStoreError(RuntimeError):
@@ -75,6 +75,18 @@ class ProposalRecord:
     draft_note_path: Optional[str]
     state: str
     created_at: str
+
+
+@dataclass(frozen=True)
+class ApprovalRecord:
+    approval_id: str
+    proposal_id: str
+    decision: str
+    approver: str
+    observed_status: str
+    detected_at: str
+    committed_at: Optional[str]
+    revoked_at: Optional[str]
 
 
 class StateTransitionRefused(RuntimeError):
@@ -214,3 +226,9 @@ class StateStore(Protocol):
         registered_at: str,
     ) -> ProposalRecord:
         """Atomically register a draft and mark it awaiting approval."""
+
+    def find_intakes_awaiting_approval(self) -> Tuple[IntakeRecord, ...]:
+        """Return every intake whose draft is waiting for a human decision."""
+
+    def record_approval(self, record: ApprovalRecord) -> IntakeRecord:
+        """Atomically record one human decision and transition its intake."""

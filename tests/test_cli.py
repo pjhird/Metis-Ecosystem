@@ -14,6 +14,12 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
+from metis.approval import (
+    ApprovalResult,
+    ApprovalRunResult,
+    ApprovalRunStatus,
+    ApprovalStatus,
+)
 from metis.capture import CaptureResult, CaptureStatus
 from metis.classification import ClassificationResult, ClassificationStatus
 from metis.cli import main
@@ -51,6 +57,21 @@ PROPOSAL_RESULT_KEYS = {
     "sensitivity",
     "status",
     "title",
+}
+APPROVAL_RUN_RESULT_KEYS = {"decisions", "message", "reason", "status"}
+APPROVAL_RESULT_KEYS = {
+    "approval_id",
+    "approver",
+    "capture_id",
+    "decision",
+    "detected_at",
+    "draft_path",
+    "intake_state",
+    "message",
+    "observed_status",
+    "proposal_id",
+    "reason",
+    "status",
 }
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
@@ -103,6 +124,17 @@ class CliTests(unittest.TestCase):
                     runtime_root=self.runtime_root,
                     model_adapter_factory=lambda: object(),
                 )
+        return return_code, stdout.getvalue(), stderr.getvalue()
+
+    def _run_with_approval_result(
+        self, result: ApprovalRunResult
+    ) -> tuple[int, str, str]:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with patch("metis.cli.ApprovalService", create=True) as service_type:
+            service_type.return_value.review.return_value = result
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                return_code = main(["approvals"], runtime_root=self.runtime_root)
         return return_code, stdout.getvalue(), stderr.getvalue()
 
     def test_capture_requires_exactly_one_text_argument(self) -> None:
@@ -204,6 +236,84 @@ class CliTests(unittest.TestCase):
                         self.assertFalse(Path(payload[key]).is_absolute())
                         self.assertNotIn("\\", payload[key])
 
+    def test_approval_shell_outcomes_use_stable_json_streams_and_codes(self):
+        decision = ApprovalResult(
+            status=ApprovalStatus.APPROVED,
+            capture_id=CAPTURE_ID,
+            proposal_id="01K1D5Q5M00000000000000001",
+            approval_id="01K1D5Q5M00000000000000002",
+            decision="approved",
+            observed_status="approved",
+            approver="human:owner",
+            draft_path=f"vault/notes/proposed/note.{CAPTURE_ID}.md",
+            intake_state="approved",
+            detected_at="2026-08-02T11:00:00Z",
+            reason=None,
+            message=None,
+        )
+        cases = (
+            (
+                ApprovalRunResult(
+                    status=ApprovalRunStatus.COMPLETED,
+                    decisions=(decision,),
+                    reason=None,
+                    message=None,
+                ),
+                0,
+                "stdout",
+            ),
+            (
+                ApprovalRunResult(
+                    status=ApprovalRunStatus.COMPLETED,
+                    decisions=(),
+                    reason=None,
+                    message=None,
+                ),
+                0,
+                "stdout",
+            ),
+            (
+                ApprovalRunResult(
+                    status=ApprovalRunStatus.FAILED,
+                    decisions=(
+                        ApprovalResult(
+                            status=ApprovalStatus.FAILED,
+                            capture_id=CAPTURE_ID,
+                            proposal_id=None,
+                            approval_id=None,
+                            decision=None,
+                            observed_status=None,
+                            approver=None,
+                            draft_path=None,
+                            intake_state="awaiting_approval",
+                            detected_at=None,
+                            reason="approval_draft_inconsistent",
+                            message="approval state could not be determined",
+                        ),
+                    ),
+                    reason=None,
+                    message=None,
+                ),
+                1,
+                "stderr",
+            ),
+        )
+        for result, code, destination in cases:
+            with self.subTest(status=result.status.value, size=len(result.decisions)):
+                return_code, stdout, stderr = self._run_with_approval_result(result)
+                rendered = stdout if destination == "stdout" else stderr
+                other = stderr if destination == "stdout" else stdout
+                payload = json.loads(rendered)
+
+                self.assertEqual(return_code, code)
+                self.assertEqual(other, "")
+                self.assertEqual(set(payload), APPROVAL_RUN_RESULT_KEYS)
+                self.assertEqual(payload["status"], result.status.value)
+                self.assertEqual(rendered, json.dumps(payload, sort_keys=True) + "\n")
+                for entry, expected in zip(payload["decisions"], result.decisions):
+                    self.assertEqual(set(entry), APPROVAL_RESULT_KEYS)
+                    self.assertEqual(entry["status"], expected.status.value)
+
     def test_propose_initialization_failure_is_safe_and_shape_stable(self):
         blocked_root = self.runtime_root / "sensitive-host-path"
         blocked_root.write_text("blocks state directory creation", encoding="utf-8")
@@ -228,12 +338,14 @@ class CliTests(unittest.TestCase):
         self.assertNotIn(str(blocked_root), stderr.getvalue())
         self.assertNotIn("blocks state", stderr.getvalue())
 
-    def test_cli_exposes_no_step_five_or_permanent_write_surface(self):
+    def test_cli_exposes_no_step_six_or_second_approval_surface(self):
         forbidden = (
             ["approve", CAPTURE_ID],
             ["reject", CAPTURE_ID],
             ["file", CAPTURE_ID],
             ["link", CAPTURE_ID],
+            ["approvals", CAPTURE_ID],
+            ["approvals", "--approve", CAPTURE_ID],
             ["propose", CAPTURE_ID, "--approve"],
             ["propose", CAPTURE_ID, "--status", "approved"],
         )

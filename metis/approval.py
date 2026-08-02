@@ -1,0 +1,290 @@
+"""Deterministic detection and recording of human approval decisions."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from enum import Enum
+from pathlib import Path
+from typing import Callable, Optional, Tuple
+
+from .data_access import (
+    ApprovalRecord,
+    IntakeRecord,
+    ProposalRecord,
+    StateStore,
+    StateStoreError,
+    StateTransitionRefused,
+)
+from .draft_notes import DraftNoteError, DraftNoteStore, render_proposed_draft
+from .identifiers import is_ulid, new_ulid
+from .proposal_content import ProposalContentError, ProposalContentStore
+
+
+# ponytail: one local owner, no authentication anywhere in the system, and the
+# vault cannot carry identity without breaking the single-editable-field
+# invariant. Replace when authenticated or multi-user identity exists.
+APPROVER = "human:owner"
+
+
+class ApprovalStatus(str, Enum):
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    PENDING = "pending"
+    FAILED = "failed"
+
+
+class ApprovalRunStatus(str, Enum):
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class ApprovalResult:
+    status: ApprovalStatus
+    capture_id: str
+    proposal_id: Optional[str]
+    approval_id: Optional[str]
+    decision: Optional[str]
+    observed_status: Optional[str]
+    approver: Optional[str]
+    draft_path: Optional[str]
+    intake_state: Optional[str]
+    detected_at: Optional[str]
+    reason: Optional[str]
+    message: Optional[str]
+
+
+@dataclass(frozen=True)
+class ApprovalRunResult:
+    status: ApprovalRunStatus
+    decisions: Tuple[ApprovalResult, ...]
+    reason: Optional[str]
+    message: Optional[str]
+
+
+class ApprovalService:
+    """Read the vault's approval signal and record the decision it carries."""
+
+    def __init__(
+        self,
+        state_store: StateStore,
+        content_store: ProposalContentStore,
+        draft_store: DraftNoteStore,
+        runtime_root: Path,
+        *,
+        id_factory: Callable[[], str] = new_ulid,
+        clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+    ) -> None:
+        self._state_store = state_store
+        self._content_store = content_store
+        self._draft_store = draft_store
+        self._runtime_root = Path(runtime_root)
+        self._id_factory = id_factory
+        self._clock = clock
+
+    def review(self) -> ApprovalRunResult:
+        try:
+            queue = self._state_store.find_intakes_awaiting_approval()
+        except StateStoreError:
+            return ApprovalRunResult(
+                status=ApprovalRunStatus.FAILED,
+                decisions=(),
+                reason="approval_state_undetermined",
+                message="the approval queue could not be read",
+            )
+        decisions = tuple(self._review_one(intake) for intake in queue)
+        failed = any(
+            decision.status is ApprovalStatus.FAILED for decision in decisions
+        )
+        return ApprovalRunResult(
+            status=(
+                ApprovalRunStatus.FAILED if failed else ApprovalRunStatus.COMPLETED
+            ),
+            decisions=decisions,
+            reason=None,
+            message=None,
+        )
+
+    def _review_one(self, intake: IntakeRecord) -> ApprovalResult:
+        try:
+            proposal = self._state_store.find_proposal_by_capture_id(
+                intake.capture_id
+            )
+        except StateStoreError:
+            return self._failed(
+                intake,
+                None,
+                "approval_state_undetermined",
+                "the proposal for this capture could not be read",
+            )
+        if not self._proposal_is_registered(intake, proposal):
+            return self._failed(
+                intake,
+                proposal,
+                "approval_proposal_inconsistent",
+                "the proposal does not match its awaiting-approval intake",
+            )
+        body = self._validated_body(proposal)
+        if body is None:
+            return self._failed(
+                intake,
+                proposal,
+                "approval_content_inconsistent",
+                "the canonical proposal content does not match its proposal",
+            )
+        try:
+            draft = self._draft_store.validate(
+                proposal.draft_note_path,
+                render_proposed_draft(proposal, body),
+            )
+        except DraftNoteError:
+            return self._failed(
+                intake,
+                proposal,
+                "approval_draft_inconsistent",
+                "the draft is missing or was edited outside its status field",
+            )
+        observed = draft.observed_status.value
+        if observed == "proposed":
+            return ApprovalResult(
+                status=ApprovalStatus.PENDING,
+                capture_id=intake.capture_id,
+                proposal_id=proposal.proposal_id,
+                approval_id=None,
+                decision=None,
+                observed_status=observed,
+                approver=None,
+                draft_path=proposal.draft_note_path,
+                intake_state=intake.state,
+                detected_at=None,
+                reason=None,
+                message="the draft is still awaiting a human decision",
+            )
+        return self._record(intake, proposal, observed)
+
+    def _record(
+        self,
+        intake: IntakeRecord,
+        proposal: ProposalRecord,
+        observed: str,
+    ) -> ApprovalResult:
+        try:
+            approval_id = self._id_factory()
+            detected_at = (
+                self._clock()
+                .astimezone(timezone.utc)
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
+        except (AttributeError, OverflowError, TypeError, ValueError):
+            return self._failed(
+                intake,
+                proposal,
+                "approval_state_undetermined",
+                "the decision could not be identified or timestamped",
+            )
+        if not is_ulid(approval_id):
+            return self._failed(
+                intake,
+                proposal,
+                "approval_state_undetermined",
+                "the decision could not be identified or timestamped",
+            )
+        record = ApprovalRecord(
+            approval_id=approval_id,
+            proposal_id=proposal.proposal_id,
+            decision=observed,
+            approver=APPROVER,
+            observed_status=observed,
+            detected_at=detected_at,
+            committed_at=None,
+            revoked_at=None,
+        )
+        try:
+            updated = self._state_store.record_approval(record)
+        except (StateStoreError, StateTransitionRefused):
+            return self._failed(
+                intake,
+                proposal,
+                "approval_state_undetermined",
+                "the decision could not be recorded",
+            )
+        if updated.state != observed:
+            return self._failed(
+                updated,
+                proposal,
+                "approval_state_undetermined",
+                "the decision could not be recorded",
+            )
+        return ApprovalResult(
+            status=ApprovalStatus(observed),
+            capture_id=intake.capture_id,
+            proposal_id=proposal.proposal_id,
+            approval_id=approval_id,
+            decision=observed,
+            observed_status=observed,
+            approver=APPROVER,
+            draft_path=proposal.draft_note_path,
+            intake_state=updated.state,
+            detected_at=detected_at,
+            reason=None,
+            message=None,
+        )
+
+    def _proposal_is_registered(
+        self,
+        intake: IntakeRecord,
+        proposal: Optional[ProposalRecord],
+    ) -> bool:
+        return (
+            proposal is not None
+            and is_ulid(proposal.proposal_id)
+            and proposal.capture_id == intake.capture_id
+            and proposal.state == "pending"
+            and proposal.draft_note_path
+            == f"vault/notes/proposed/note.{intake.capture_id}.md"
+            and proposal.body_path
+            == f"proposal-content/{proposal.proposal_id}/body.md"
+        )
+
+    def _validated_body(self, proposal: ProposalRecord) -> Optional[bytes]:
+        try:
+            content = self._content_store.validate_directory(
+                self._runtime_root / Path(proposal.body_path).parent
+            )
+            body = content.body_path.read_bytes()
+        except (OSError, ProposalContentError, TypeError, ValueError):
+            return None
+        if (
+            content.proposal_id != proposal.proposal_id
+            or content.capture_id != proposal.capture_id
+            or content.classification_id != proposal.classification_id
+            or content.content_hash != proposal.content_hash
+            or len(body) != content.byte_size
+        ):
+            return None
+        return body
+
+    def _failed(
+        self,
+        intake: IntakeRecord,
+        proposal: Optional[ProposalRecord],
+        reason: str,
+        message: str,
+    ) -> ApprovalResult:
+        return ApprovalResult(
+            status=ApprovalStatus.FAILED,
+            capture_id=intake.capture_id,
+            proposal_id=None if proposal is None else proposal.proposal_id,
+            approval_id=None,
+            decision=None,
+            observed_status=None,
+            approver=None,
+            draft_path=None if proposal is None else proposal.draft_note_path,
+            intake_state=intake.state,
+            detected_at=None,
+            reason=reason,
+            message=message,
+        )

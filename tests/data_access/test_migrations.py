@@ -7,6 +7,7 @@ from contextlib import closing
 from pathlib import Path
 
 from metis.data_access import (
+    ApprovalRecord,
     ClassificationRecord,
     IntakeRecord,
     IntakeRegistrationResult,
@@ -210,6 +211,12 @@ class FakeStateStore:
     ) -> ProposalRecord:
         raise NotImplementedError
 
+    def find_intakes_awaiting_approval(self) -> tuple[IntakeRecord, ...]:
+        return ()
+
+    def record_approval(self, record: ApprovalRecord) -> IntakeRecord:
+        raise NotImplementedError
+
 
 class MigrationTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -387,10 +394,10 @@ class MigrationTests(unittest.TestCase):
     def test_state_store_contract_is_engine_agnostic(self) -> None:
         self.assertIsInstance(FakeStateStore(), StateStore)
 
-    def test_migration_three_creates_six_operational_tables(self) -> None:
+    def test_migrations_create_six_operational_tables(self) -> None:
         store = self._initialize()
 
-        self.assertEqual(store.schema_version, 3)
+        self.assertEqual(store.schema_version, 4)
         with sqlite3.connect(self.database_path) as connection:
             rows = connection.execute(
                 "SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name"
@@ -605,6 +612,11 @@ class MigrationTests(unittest.TestCase):
         self.assertIn(("capture_id",), unique_indexes)
         self.assertIn(("classification_id",), unique_indexes)
 
+    def test_approval_proposal_is_unique(self) -> None:
+        self._initialize()
+
+        self.assertIn(("proposal_id",), self._unique_indexes("approval"))
+
     def test_reservation_capture_and_classification_are_unique(self) -> None:
         self._initialize()
 
@@ -716,7 +728,7 @@ class MigrationTests(unittest.TestCase):
     def test_reapplying_migrations_is_idempotent(self) -> None:
         store = self._initialize()
         store.initialize()
-        self.assertEqual(store.schema_version, 3)
+        self.assertEqual(store.schema_version, 4)
         self.assertEqual(self._columns("intake"), EXPECTED_COLUMNS["intake"])
 
     def test_migration_preserves_existing_intake_and_classification_rows(self) -> None:
@@ -744,7 +756,7 @@ class MigrationTests(unittest.TestCase):
             )
         store = self._initialize()
 
-        self.assertEqual(store.schema_version, 3)
+        self.assertEqual(store.schema_version, 4)
         with sqlite3.connect(self.database_path) as connection:
             intake_count = connection.execute("SELECT COUNT(*) FROM intake").fetchone()
             classification_count = connection.execute(
@@ -833,13 +845,13 @@ class MigrationTests(unittest.TestCase):
     def test_newer_database_schema_fails_closed(self) -> None:
         self.database_path.parent.mkdir(parents=True)
         with sqlite3.connect(self.database_path) as connection:
-            connection.execute("PRAGMA user_version = 4")
+            connection.execute("PRAGMA user_version = 5")
         store = SQLiteStateStore(self.database_path)
         self.addCleanup(store.close)
 
         with self.assertRaisesRegex(
             MigrationError,
-            "database schema version 4 is newer than supported version 3",
+            "database schema version 5 is newer than supported version 4",
         ):
             store.initialize()
 

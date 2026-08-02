@@ -97,7 +97,7 @@ class RepositorySkeletonTests(unittest.TestCase):
             },
         )
 
-    def test_step_four_governed_documentation_is_current(self) -> None:
+    def test_step_five_governed_documentation_is_current(self) -> None:
         agents = (REPOSITORY_ROOT / "AGENTS.md").read_text(encoding="utf-8")
         schemas = (REPOSITORY_ROOT / "METIS-SCHEMAS.md").read_text(encoding="utf-8")
         ledger = (REPOSITORY_ROOT / "METIS-REQUIREMENT-LEDGER.md").read_text(
@@ -105,14 +105,25 @@ class RepositorySkeletonTests(unittest.TestCase):
         )
 
         self.assertIn('metis propose "<capture-id>"', agents)
+        self.assertNotIn("metis approvals            # not yet implemented", agents)
         self.assertIn("migration `003_proposal_reservation.sql`", schemas)
         self.assertIn("### 2.4 `proposal_reservation`", schemas)
-        self.assertIn("build-order step 4", ledger)
-        gov_row = next(
-            line for line in ledger.splitlines() if line.startswith("| REQ-GOV-003 ")
-        )
-        self.assertIn("| Partial |", gov_row)
-        self.assertIn("test_capture_classify_propose_and_replay_stop_before_step_five", gov_row)
+        self.assertIn("`004_unique_approval_proposal.sql`", schemas)
+        self.assertIn("build-order step 5", ledger)
+        for requirement, expected in (
+            ("REQ-GOV-003", "| Verified |"),
+            ("REQ-GOV-004", "| Verified |"),
+            ("REQ-VLT-003", "| Verified |"),
+            ("REQ-GOV-001", "| Missing |"),
+            ("REQ-ORCH-004", "| Missing |"),
+        ):
+            row = next(
+                line
+                for line in ledger.splitlines()
+                if line.startswith(f"| {requirement} ")
+            )
+            with self.subTest(requirement=requirement):
+                self.assertIn(expected, row)
 
 
 if __name__ == "__main__":

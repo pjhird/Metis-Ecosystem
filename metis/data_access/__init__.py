@@ -1,6 +1,7 @@
 """Operational-state interface and SQLite implementation."""
 
 from .contracts import (
+    ApprovalRecord,
     ClassificationRecord,
     IntakeRecord,
     IntakeRegistrationResult,
@@ -14,6 +15,7 @@ from .contracts import (
 from .sqlite import MigrationError, SQLiteStateStore
 
 __all__ = [
+    "ApprovalRecord",
     "ClassificationRecord",
     "IntakeRecord",
     "IntakeRegistrationResult",
