@@ -15,12 +15,25 @@ from pathlib import Path
 from unittest.mock import patch
 
 from metis.capture import CaptureResult, CaptureStatus
+from metis.classification import ClassificationResult, ClassificationStatus
 from metis.cli import main
 
 
 CAPTURE_ID = "8f14e45f-ea3c-4f7a-9f2d-6c8b5a1d3e70"
 EVIDENCE_PATH = f"evidence/{CAPTURE_ID}"
 RESULT_KEYS = {"capture_id", "evidence_path", "message", "reason", "status"}
+CLASSIFICATION_RESULT_KEYS = {
+    "candidate_type",
+    "capture_id",
+    "classification_id",
+    "confidence",
+    "message",
+    "raw_response_path",
+    "reason",
+    "routing",
+    "sensitivity",
+    "status",
+}
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -44,6 +57,21 @@ class CliTests(unittest.TestCase):
                 )
         return return_code, stdout.getvalue(), stderr.getvalue()
 
+    def _run_with_classification_result(
+        self, result: ClassificationResult
+    ) -> tuple[int, str, str]:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with patch("metis.cli.ClassificationService", create=True) as service_type:
+            service_type.return_value.classify.return_value = result
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                return_code = main(
+                    ["classify", CAPTURE_ID],
+                    runtime_root=self.runtime_root,
+                    model_adapter_factory=lambda: object(),
+                )
+        return return_code, stdout.getvalue(), stderr.getvalue()
+
     def test_capture_requires_exactly_one_text_argument(self) -> None:
         for argv in (["capture"], ["capture", "one", "two"]):
             with self.subTest(argv=argv):
@@ -51,6 +79,109 @@ class CliTests(unittest.TestCase):
                     with self.assertRaises(SystemExit) as raised:
                         main(argv, runtime_root=self.runtime_root)
                 self.assertEqual(raised.exception.code, 2)
+
+    def test_classify_requires_exactly_one_capture_id(self) -> None:
+        for argv in (["classify"], ["classify", CAPTURE_ID, "extra"]):
+            with self.subTest(argv=argv):
+                with redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit) as raised:
+                        main(
+                            argv,
+                            runtime_root=self.runtime_root,
+                            model_adapter_factory=lambda: object(),
+                        )
+                self.assertEqual(raised.exception.code, 2)
+
+    def test_classification_shell_outcomes_write_one_stable_json_object(
+        self,
+    ) -> None:
+        cases = (
+            (
+                ClassificationResult(
+                    ClassificationStatus.CLASSIFIED,
+                    CAPTURE_ID,
+                    "01K1D5Q5M00000000000000000",
+                    "idea",
+                    "normal",
+                    0.82,
+                    "proposal:idea",
+                    (
+                        "classification-evidence/"
+                        "01K1D5Q5M00000000000000000/raw-response.txt"
+                    ),
+                    None,
+                    None,
+                ),
+                0,
+                "stdout",
+            ),
+            (
+                ClassificationResult(
+                    ClassificationStatus.DUPLICATE,
+                    CAPTURE_ID,
+                    "01K1D5Q5M00000000000000000",
+                    "idea",
+                    "normal",
+                    0.82,
+                    "proposal:idea",
+                    (
+                        "classification-evidence/"
+                        "01K1D5Q5M00000000000000000/raw-response.txt"
+                    ),
+                    "already_classified",
+                    "capture is already classified",
+                ),
+                0,
+                "stdout",
+            ),
+            (
+                ClassificationResult(
+                    ClassificationStatus.REFUSED,
+                    CAPTURE_ID,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "capture_not_found",
+                    "capture was not found",
+                ),
+                0,
+                "stdout",
+            ),
+            (
+                ClassificationResult(
+                    ClassificationStatus.FAILED,
+                    CAPTURE_ID,
+                    "01K1D5Q5M00000000000000000",
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "model_request_failed",
+                    "classification failed",
+                ),
+                1,
+                "stderr",
+            ),
+        )
+
+        for result, expected_code, destination in cases:
+            with self.subTest(status=result.status.value):
+                return_code, stdout, stderr = self._run_with_classification_result(
+                    result
+                )
+                rendered = stdout if destination == "stdout" else stderr
+                other = stderr if destination == "stdout" else stdout
+                payload = json.loads(rendered)
+
+                self.assertEqual(return_code, expected_code)
+                self.assertEqual(other, "")
+                self.assertEqual(set(payload), CLASSIFICATION_RESULT_KEYS)
+                self.assertEqual(payload["status"], result.status.value)
+                self.assertEqual(rendered, json.dumps(payload, sort_keys=True) + "\n")
 
     def test_successful_shell_outcomes_write_one_stable_json_object(self) -> None:
         cases = (
@@ -133,6 +264,27 @@ class CliTests(unittest.TestCase):
         self.assertIsNone(payload["evidence_path"])
         self.assertIsInstance(payload["message"], str)
         self.assertTrue(payload["message"])
+
+    def test_classify_state_initialization_failure_preserves_stable_shape(self) -> None:
+        blocked_root = self.runtime_root / "not-a-directory-classify"
+        blocked_root.write_text("blocks state directory creation", encoding="utf-8")
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            return_code = main(
+                ["classify", CAPTURE_ID],
+                runtime_root=blocked_root,
+                model_adapter_factory=lambda: object(),
+            )
+
+        payload = json.loads(stderr.getvalue())
+        self.assertEqual(return_code, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(set(payload), CLASSIFICATION_RESULT_KEYS)
+        self.assertEqual(payload["status"], "failed")
+        self.assertEqual(payload["capture_id"], CAPTURE_ID)
+        self.assertEqual(payload["reason"], "state_initialization_failed")
 
     def test_partial_evidence_collision_is_failed_json_with_nonzero_exit(
         self,
@@ -367,6 +519,125 @@ class PackagingTests(unittest.TestCase):
                     / "001_initial.sql"
                 ).is_file()
             )
+
+    def test_installed_classify_records_missing_configuration_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            source_root = temporary_root / "source"
+            wheel_directory = temporary_root / "wheel"
+            virtual_environment = temporary_root / "venv"
+            runtime_root = temporary_root / "runtime"
+            source_root.mkdir()
+            wheel_directory.mkdir()
+            runtime_root.mkdir()
+            shutil.copy2(REPOSITORY_ROOT / "pyproject.toml", source_root)
+            shutil.copytree(
+                REPOSITORY_ROOT / "metis",
+                source_root / "metis",
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+            )
+            environment = os.environ.copy()
+            environment["PIP_NO_INDEX"] = "1"
+            environment.pop("PYTHONPATH", None)
+            environment.pop("ANTHROPIC_API_KEY", None)
+            environment.pop("METIS_CLASSIFICATION_MODEL", None)
+
+            build = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "wheel",
+                    "--no-deps",
+                    "--no-build-isolation",
+                    "--wheel-dir",
+                    str(wheel_directory),
+                    str(source_root),
+                ],
+                cwd=temporary_root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(build.returncode, 0, build.stderr)
+            wheel = next(wheel_directory.glob("*.whl"))
+
+            create_environment = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "venv",
+                    "--system-site-packages",
+                    str(virtual_environment),
+                ],
+                cwd=temporary_root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(
+                create_environment.returncode,
+                0,
+                create_environment.stderr,
+            )
+            installed_python = virtual_environment / "bin" / "python"
+            install = subprocess.run(
+                [
+                    str(installed_python),
+                    "-m",
+                    "pip",
+                    "install",
+                    "--no-deps",
+                    "--no-index",
+                    str(wheel),
+                ],
+                cwd=temporary_root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(install.returncode, 0, install.stderr)
+
+            executable = virtual_environment / "bin" / "metis"
+            capture = subprocess.run(
+                [str(executable), "capture", "wheel classification smoke test"],
+                cwd=runtime_root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(capture.returncode, 0, capture.stderr)
+            capture_payload = json.loads(capture.stdout)
+            capture_id = capture_payload["capture_id"]
+            capture_directory = runtime_root / "evidence" / capture_id
+            before = {
+                path.name: path.read_bytes() for path in capture_directory.iterdir()
+            }
+
+            classification = subprocess.run(
+                [str(executable), "classify", capture_id],
+                cwd=runtime_root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(classification.returncode, 1)
+            self.assertEqual(classification.stdout, "")
+            payload = json.loads(classification.stderr)
+            self.assertEqual(set(payload), CLASSIFICATION_RESULT_KEYS)
+            self.assertEqual(payload["status"], "failed")
+            self.assertEqual(payload["reason"], "model_configuration_failed")
+            self.assertEqual(
+                {path.name: path.read_bytes() for path in capture_directory.iterdir()},
+                before,
+            )
+            self.assertFalse((runtime_root / "classification-evidence").exists())
 
 
 if __name__ == "__main__":

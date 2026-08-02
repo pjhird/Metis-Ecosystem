@@ -81,6 +81,10 @@ class RepositorySkeletonTests(unittest.TestCase):
                                 "run": "python -m pip install setuptools",
                             },
                             {
+                                "name": "Install project and runtime dependencies",
+                                "run": "python -m pip install --no-build-isolation -e .",
+                            },
+                            {
                                 "name": "Run test suite",
                                 "run": "python -m unittest discover -s tests -v",
                             },

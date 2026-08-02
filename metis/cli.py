@@ -1,4 +1,4 @@
-"""Command-line entry point for typed capture."""
+"""Command-line entry point for explicit Metis operations."""
 
 from __future__ import annotations
 
@@ -7,9 +7,15 @@ import json
 import sys
 from dataclasses import asdict
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 from .capture import CaptureResult, CaptureService, CaptureStatus
+from .classification import (
+    ClassificationResult,
+    ClassificationService,
+    ClassificationStatus,
+)
+from .classification_evidence import ClassificationEvidenceStore
 from .data_access import SQLiteStateStore
 from .evidence import EvidenceStore
 
@@ -18,11 +24,14 @@ def main(
     argv: Optional[Sequence[str]] = None,
     *,
     runtime_root: Optional[Path] = None,
+    model_adapter_factory: Optional[Callable[[], object]] = None,
 ) -> int:
     parser = argparse.ArgumentParser(prog="metis")
     subparsers = parser.add_subparsers(dest="command", required=True)
     capture_parser = subparsers.add_parser("capture")
     capture_parser.add_argument("text")
+    classify_parser = subparsers.add_parser("classify")
+    classify_parser.add_argument("capture_id")
     arguments = parser.parse_args(argv)
 
     root = Path.cwd() if runtime_root is None else Path(runtime_root)
@@ -31,22 +40,51 @@ def main(
         with SQLiteStateStore(root / "state" / "metis.db") as state_store:
             state_store.initialize()
             initialized = True
-            result = CaptureService(state_store, EvidenceStore(root)).capture(
-                arguments.text
-            )
+            if arguments.command == "capture":
+                result = CaptureService(state_store, EvidenceStore(root)).capture(
+                    arguments.text
+                )
+            else:
+                if model_adapter_factory is None:
+                    from .model_adapters.claude import ClaudeModelAdapter
+
+                    model_adapter = ClaudeModelAdapter()
+                else:
+                    model_adapter = model_adapter_factory()
+                result = ClassificationService(
+                    state_store,
+                    EvidenceStore(root),
+                    ClassificationEvidenceStore(root),
+                    model_adapter,
+                    root,
+                ).classify(arguments.capture_id)
     except Exception as error:
         if initialized:
             raise
-        result = CaptureResult(
-            CaptureStatus.FAILED,
-            None,
-            None,
-            "state_initialization_failed",
-            str(error),
-        )
+        if arguments.command == "capture":
+            result = CaptureResult(
+                CaptureStatus.FAILED,
+                None,
+                None,
+                "state_initialization_failed",
+                str(error),
+            )
+        else:
+            result = ClassificationResult(
+                ClassificationStatus.FAILED,
+                arguments.capture_id,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                "state_initialization_failed",
+                str(error),
+            )
 
     payload = asdict(result)
     payload["status"] = result.status.value
-    output = sys.stderr if result.status is CaptureStatus.FAILED else sys.stdout
+    output = sys.stderr if result.status.value == "failed" else sys.stdout
     print(json.dumps(payload, sort_keys=True), file=output)
-    return 1 if result.status is CaptureStatus.FAILED else 0
+    return 1 if result.status.value == "failed" else 0
