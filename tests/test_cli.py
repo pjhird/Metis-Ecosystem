@@ -17,6 +17,7 @@ from unittest.mock import patch
 from metis.capture import CaptureResult, CaptureStatus
 from metis.classification import ClassificationResult, ClassificationStatus
 from metis.cli import main
+from metis.proposal import ProposalResult, ProposalStatus
 
 
 CAPTURE_ID = "8f14e45f-ea3c-4f7a-9f2d-6c8b5a1d3e70"
@@ -33,6 +34,23 @@ CLASSIFICATION_RESULT_KEYS = {
     "routing",
     "sensitivity",
     "status",
+}
+PROPOSAL_RESULT_KEYS = {
+    "capture_id",
+    "classification_id",
+    "confidence",
+    "content_path",
+    "draft_path",
+    "intake_state",
+    "message",
+    "note_type",
+    "proposal_id",
+    "raw_response_path",
+    "reason",
+    "risk_level",
+    "sensitivity",
+    "status",
+    "title",
 }
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
@@ -72,6 +90,21 @@ class CliTests(unittest.TestCase):
                 )
         return return_code, stdout.getvalue(), stderr.getvalue()
 
+    def _run_with_proposal_result(
+        self, result: ProposalResult
+    ) -> tuple[int, str, str]:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with patch("metis.cli.ProposalService", create=True) as service_type:
+            service_type.return_value.propose.return_value = result
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                return_code = main(
+                    ["propose", CAPTURE_ID],
+                    runtime_root=self.runtime_root,
+                    model_adapter_factory=lambda: object(),
+                )
+        return return_code, stdout.getvalue(), stderr.getvalue()
+
     def test_capture_requires_exactly_one_text_argument(self) -> None:
         for argv in (["capture"], ["capture", "one", "two"]):
             with self.subTest(argv=argv):
@@ -82,6 +115,129 @@ class CliTests(unittest.TestCase):
 
     def test_classify_requires_exactly_one_capture_id(self) -> None:
         for argv in (["classify"], ["classify", CAPTURE_ID, "extra"]):
+            with self.subTest(argv=argv):
+                with redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit) as raised:
+                        main(
+                            argv,
+                            runtime_root=self.runtime_root,
+                            model_adapter_factory=lambda: object(),
+                        )
+                self.assertEqual(raised.exception.code, 2)
+
+    def test_propose_requires_exactly_one_capture_id(self) -> None:
+        for argv in (["propose"], ["propose", CAPTURE_ID, "extra"]):
+            with self.subTest(argv=argv):
+                with redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit) as raised:
+                        main(
+                            argv,
+                            runtime_root=self.runtime_root,
+                            model_adapter_factory=lambda: object(),
+                        )
+                self.assertEqual(raised.exception.code, 2)
+
+    def test_proposal_shell_outcomes_use_stable_json_streams_and_codes(self):
+        base = dict(
+            capture_id=CAPTURE_ID,
+            classification_id="01K1D5Q5M00000000000000000",
+            proposal_id="01K1D5Q5M00000000000000001",
+            note_type="idea",
+            title="Review workflow",
+            confidence=0.82,
+            sensitivity="normal",
+            risk_level="low",
+            raw_response_path=(
+                "proposal-evidence/01K1D5Q5M00000000000000001/raw-response.txt"
+            ),
+            content_path="proposal-content/01K1D5Q5M00000000000000001/body.md",
+            draft_path=f"vault/notes/proposed/note.{CAPTURE_ID}.md",
+            intake_state="awaiting_approval",
+            reason=None,
+            message=None,
+        )
+        cases = (
+            (ProposalResult(status=ProposalStatus.PROPOSED, **base), 0, "stdout"),
+            (ProposalResult(status=ProposalStatus.DUPLICATE, **base), 0, "stdout"),
+            (
+                ProposalResult(
+                    status=ProposalStatus.REFUSED,
+                    **{
+                        **base,
+                        "intake_state": "proposing",
+                        "reason": "proposal_in_progress",
+                        "message": "proposal generation is already in progress",
+                    },
+                ),
+                0,
+                "stdout",
+            ),
+            (
+                ProposalResult(
+                    status=ProposalStatus.FAILED,
+                    **{
+                        **base,
+                        "draft_path": None,
+                        "intake_state": "failed",
+                        "reason": "draft_write_failed",
+                        "message": "proposal failed",
+                    },
+                ),
+                1,
+                "stderr",
+            ),
+        )
+        for result, code, destination in cases:
+            with self.subTest(status=result.status.value):
+                return_code, stdout, stderr = self._run_with_proposal_result(result)
+                rendered = stdout if destination == "stdout" else stderr
+                other = stderr if destination == "stdout" else stdout
+                payload = json.loads(rendered)
+
+                self.assertEqual(return_code, code)
+                self.assertEqual(other, "")
+                self.assertEqual(set(payload), PROPOSAL_RESULT_KEYS)
+                self.assertEqual(payload["status"], result.status.value)
+                self.assertEqual(rendered, json.dumps(payload, sort_keys=True) + "\n")
+                for key in ("raw_response_path", "content_path", "draft_path"):
+                    if payload[key] is not None:
+                        self.assertFalse(Path(payload[key]).is_absolute())
+                        self.assertNotIn("\\", payload[key])
+
+    def test_propose_initialization_failure_is_safe_and_shape_stable(self):
+        blocked_root = self.runtime_root / "sensitive-host-path"
+        blocked_root.write_text("blocks state directory creation", encoding="utf-8")
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            return_code = main(
+                ["propose", CAPTURE_ID],
+                runtime_root=blocked_root,
+                model_adapter_factory=lambda: object(),
+            )
+
+        payload = json.loads(stderr.getvalue())
+        self.assertEqual(return_code, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(set(payload), PROPOSAL_RESULT_KEYS)
+        self.assertEqual(payload["status"], "failed")
+        self.assertEqual(payload["capture_id"], CAPTURE_ID)
+        self.assertEqual(payload["reason"], "state_initialization_failed")
+        self.assertEqual(payload["message"], "state initialization failed")
+        self.assertNotIn(str(blocked_root), stderr.getvalue())
+        self.assertNotIn("blocks state", stderr.getvalue())
+
+    def test_cli_exposes_no_step_five_or_permanent_write_surface(self):
+        forbidden = (
+            ["approve", CAPTURE_ID],
+            ["reject", CAPTURE_ID],
+            ["file", CAPTURE_ID],
+            ["link", CAPTURE_ID],
+            ["propose", CAPTURE_ID, "--approve"],
+            ["propose", CAPTURE_ID, "--status", "approved"],
+        )
+        for argv in forbidden:
             with self.subTest(argv=argv):
                 with redirect_stderr(io.StringIO()):
                     with self.assertRaises(SystemExit) as raised:
