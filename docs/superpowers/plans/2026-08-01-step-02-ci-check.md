@@ -14,6 +14,7 @@
 - Keep PR #2 draft, open, and unmerged; do not enable auto-merge or request reviews.
 - Add no Step 3 classification, model, prompt, confidence, or raw-response behavior.
 - Add no project dependency, secret, token, cache, artifact upload, matrix, scheduled trigger, push trigger, or deployment.
+- The workflow may install only `setuptools`, the build-system requirement already declared by `pyproject.toml`.
 - The workflow grants only `contents: read` and runs only for pull requests targeting `main`.
 - The required check context is exactly `metis/tests`.
 - Preserve every existing branch-protection value except replacing `metis/step-1-tests` with `metis/tests` after the new check succeeds.
@@ -65,6 +66,10 @@ Add `import json` before `import subprocess` in `tests/test_repository_skeleton.
                                 "name": "Set up Python",
                                 "uses": "actions/setup-python@v5",
                                 "with": {"python-version": "3.13"},
+                            },
+                            {
+                                "name": "Install build backend",
+                                "run": "python -m pip install setuptools",
                             },
                             {
                                 "name": "Run test suite",
@@ -121,6 +126,10 @@ Create `.github/workflows/metis-tests.yml` with exactly this JSON-compatible YAM
           }
         },
         {
+          "name": "Install build backend",
+          "run": "python -m pip install setuptools"
+        },
+        {
           "name": "Run test suite",
           "run": "python -m unittest discover -s tests -v"
         }
@@ -130,7 +139,8 @@ Create `.github/workflows/metis-tests.yml` with exactly this JSON-compatible YAM
 }
 ```
 
-Do not add dependency installation, caching, matrices, extra events, retries, `continue-on-error`, or write permissions.
+Do not add dependency installation beyond the declared `setuptools` build backend, caching, matrices, extra
+events, retries, `continue-on-error`, or write permissions.
 
 - [ ] **Step 4: Run the focused test and verify the GREEN state**
 

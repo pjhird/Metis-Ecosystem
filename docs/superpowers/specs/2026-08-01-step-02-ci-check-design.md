@@ -23,6 +23,7 @@ not change any requirement-ledger status.
 - Run the complete standard-library test suite for pull requests targeting `main`.
 - Publish one stable job context named `metis/tests`.
 - Grant the workflow read-only repository contents permission.
+- Install the existing `setuptools` build-system requirement before running the suite.
 - Add a repository-contract test before the workflow file so the change follows red-green TDD.
 - Push the verified change to the existing `step/02-capture` branch and observe the real GitHub Actions result.
 - After `metis/tests` succeeds, replace `metis/step-1-tests` with `metis/tests` in the `main` protection rule.
@@ -33,8 +34,9 @@ not change any requirement-ledger status.
 - No change to PR draft state, reviews, merge method, auto-merge, or merge state.
 - No removal or weakening of pull-request, up-to-date-branch, conversation-resolution, administrator,
   force-push, or deletion protections.
-- No new dependency, test framework, secret, token, artifact upload, cache, matrix, scheduled run, push run, or
-  deployment.
+- No new Metis runtime dependency, test framework, secret, token, artifact upload, cache, matrix, scheduled
+  run, push run, or deployment. The workflow may install only the `setuptools` build-system requirement already
+  declared by `pyproject.toml`.
 - No requirement-ledger status change.
 - `METIS-EXECUTION-SPINE.md` remains uninspected, unmodified, unstaged, and uncommitted.
 
@@ -67,11 +69,14 @@ ADR-019's fail-closed code-governance gate and is not acceptable.
 - Run on GitHub's Ubuntu hosted runner.
 - Set up Python 3.13, matching the recorded Step-2 verification version family.
 - Check out the pull-request source.
+- Run `python -m pip install setuptools` to supply the declared build backend absent from the clean runner.
 - Run `python -m unittest discover -s tests -v` from the repository root.
 - Report failure honestly through the job result; do not retry, suppress, or convert failures to success.
 
-The workflow does not install Metis or project dependencies because the application uses the standard library
-and the suite already exercises wheel construction and installed-console-script behavior.
+The workflow does not install Metis or any runtime dependency. It installs `setuptools` because
+`pyproject.toml` declares `setuptools.build_meta` as the build backend and the packaging test deliberately runs
+offline with build isolation disabled. GitHub's clean Python 3.13 runner does not otherwise provide that
+backend.
 
 ## 5. Test and verification design
 
@@ -88,8 +93,14 @@ Implementation follows this sequence:
 8. Observe the GitHub Actions run on PR #2. A local pass is not a substitute for this remote result.
 
 The repository-contract test will assert the durable observable contract: file location, pull-request trigger,
-`main` target, read-only contents permission, stable job name, Python 3.13 selection, and exact full-suite
-command. GitHub's workflow parser and runner remain the authoritative validation of YAML syntax and execution.
+`main` target, read-only contents permission, stable job name, Python 3.13 selection, declared build-backend
+installation, and exact full-suite command. GitHub's workflow parser and runner remain the authoritative
+validation of YAML syntax and execution.
+
+The first remote run proved the original workflow incomplete: 77 tests passed, but the packaging test failed
+with `BackendUnavailable: Cannot import 'setuptools.build_meta'`. The human owner approved the narrow
+build-backend installation amendment on 2026-08-01. Node runtime deprecation messages from the two official
+actions were non-failing and remain outside this fix.
 
 ## 6. Protection transition
 

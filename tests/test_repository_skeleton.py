@@ -75,6 +75,10 @@ class RepositorySkeletonTests(unittest.TestCase):
                                 "with": {"python-version": "3.13"},
                             },
                             {
+                                "name": "Install build backend",
+                                "run": "python -m pip install setuptools",
+                            },
+                            {
                                 "name": "Run test suite",
                                 "run": "python -m unittest discover -s tests -v",
                             },
