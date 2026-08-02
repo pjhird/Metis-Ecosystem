@@ -12,10 +12,23 @@ from metis.data_access import (
     ClassificationRecord,
     IntakeRecord,
     SQLiteStateStore,
+    StateStoreError,
 )
-from metis.draft_notes import DraftNoteStore, DraftStatus, render_proposed_draft
+from metis.draft_notes import (
+    DraftNoteStore,
+    DraftNoteWriteError,
+    DraftStatus,
+    render_proposed_draft,
+)
 from metis.evidence import EvidenceStore
-from metis.model_adapters import ModelResponse
+from metis.model_adapters import (
+    ModelConfigurationError,
+    ModelRequestError,
+    ModelResponse,
+    ModelResponseRefused,
+    ModelResponseTruncated,
+    UnsupportedModelResponse,
+)
 from metis.proposal import ProposalService, ProposalStatus
 from metis.proposal_content import ProposalContentStore
 from metis.proposal_evidence import ProposalEvidenceStore
@@ -44,6 +57,7 @@ class InspectingAdapter:
     def __init__(self, store: SQLiteStateStore, raw_text: str = PROPOSAL_RAW) -> None:
         self.store = store
         self.raw_text = raw_text
+        self.error = None
         self.proposal_prompts: list[str] = []
 
     def classify(self, prompt: str) -> ModelResponse:
@@ -55,7 +69,39 @@ class InspectingAdapter:
         if intake is None or intake.state != "proposing" or reservation is None:
             raise AssertionError("model call occurred before durable reservation")
         self.proposal_prompts.append(prompt)
+        if self.error is not None:
+            raise self.error
         return ModelResponse("claude-proposal-returned-model", self.raw_text)
+
+
+class StateStoreProxy:
+    def __init__(self, store: SQLiteStateStore) -> None:
+        self.store = store
+
+    def __getattr__(self, name):
+        return getattr(self.store, name)
+
+
+class FailingStateStore(StateStoreProxy):
+    def __init__(self, store: SQLiteStateStore, failing_method: str) -> None:
+        super().__init__(store)
+        self.failing_method = failing_method
+
+    def __getattr__(self, name):
+        if name == self.failing_method:
+            def fail(*args, **kwargs):
+                raise StateStoreError("unsafe database detail")
+
+            return fail
+        return super().__getattr__(name)
+
+
+class FailingDraftStore:
+    def create(self, relative_path, expected_bytes):
+        raise DraftNoteWriteError("unsafe filesystem detail", relative_path)
+
+    def validate(self, relative_path, expected_bytes):
+        raise AssertionError("failed draft must not be validated")
 
 
 class ProposalServiceTests(unittest.TestCase):
@@ -134,14 +180,20 @@ class ProposalServiceTests(unittest.TestCase):
             )
         )
 
-    def _service(self, adapter: InspectingAdapter) -> ProposalService:
+    def _service(
+        self,
+        adapter: InspectingAdapter,
+        *,
+        state_store=None,
+        draft_store=None,
+    ) -> ProposalService:
         return ProposalService(
-            self.state_store,
+            self.state_store if state_store is None else state_store,
             self.evidence_store,
             self.classification_store,
             self.proposal_evidence_store,
             self.content_store,
-            self.draft_store,
+            self.draft_store if draft_store is None else draft_store,
             adapter,
             self.runtime_root,
             id_factory=lambda: PROPOSAL_ID,
@@ -230,6 +282,263 @@ class ProposalServiceTests(unittest.TestCase):
         self.assertIn('"confidence":0.82', prompt)
         self.assertNotIn(PROPOSAL_ID, prompt)
         self.assertNotIn(LEASE_TOKEN, prompt)
+
+    def test_missing_or_noncanonical_capture_fails_before_model_call(self) -> None:
+        adapter = InspectingAdapter(self.state_store)
+
+        for capture_id in (CAPTURE_ID, "not-a-uuid"):
+            with self.subTest(capture_id=capture_id):
+                result = self._service(adapter).propose(capture_id)
+                self.assertEqual(result.status, ProposalStatus.FAILED)
+                self.assertEqual(result.reason, "proposal_consistency_failed")
+
+        self.assertEqual(adapter.proposal_prompts, [])
+        self.assertFalse((self.runtime_root / "proposal-evidence").exists())
+
+    def test_corrupt_classification_evidence_fails_before_model_call(self) -> None:
+        self._classified()
+        adapter = InspectingAdapter(self.state_store)
+        raw_path = (
+            self.runtime_root
+            / "classification-evidence"
+            / CLASSIFICATION_ID
+            / "raw-response.txt"
+        )
+        raw_path.write_text("corrupt", encoding="utf-8")
+
+        result = self._service(adapter).propose(CAPTURE_ID)
+
+        self.assertEqual(result.status, ProposalStatus.FAILED)
+        self.assertEqual(result.reason, "proposal_consistency_failed")
+        self.assertEqual(adapter.proposal_prompts, [])
+        self.assertEqual(
+            self.state_store.find_intake_by_capture_id(CAPTURE_ID).state,
+            "classified",
+        )
+
+    def test_model_configuration_failure_is_recorded_safely(self) -> None:
+        self._classified()
+        adapter = InspectingAdapter(self.state_store)
+        adapter.error = ModelConfigurationError(
+            "model_configuration_failed",
+            "unsafe provider configuration detail",
+        )
+
+        result = self._service(adapter).propose(CAPTURE_ID)
+
+        self._assert_recorded_attempt_failure(result, "model_configuration_failed")
+        self.assertIsNone(result.raw_response_path)
+        self.assertNotIn("unsafe", result.message)
+
+    def test_model_request_failure_is_recorded_safely(self) -> None:
+        self._classified()
+        adapter = InspectingAdapter(self.state_store)
+        adapter.error = ModelRequestError(
+            "model_request_failed",
+            "unsafe provider request detail",
+        )
+
+        result = self._service(adapter).propose(CAPTURE_ID)
+
+        self._assert_recorded_attempt_failure(result, "model_request_failed")
+        self.assertIsNone(result.raw_response_path)
+
+    def test_refused_response_is_preserved_before_failure_recording(self) -> None:
+        self._classified()
+        adapter = InspectingAdapter(self.state_store)
+        raw_text = '{"refusal":"unsafe provider text"}'
+        adapter.error = ModelResponseRefused(
+            "model_response_refused",
+            "unsafe provider refusal detail",
+            model_id="claude-returned-model",
+            raw_text=raw_text,
+        )
+
+        result = self._service(adapter).propose(CAPTURE_ID)
+
+        self._assert_recorded_attempt_failure(result, "model_response_refused")
+        self.assertEqual(
+            (self.runtime_root / result.raw_response_path).read_text(encoding="utf-8"),
+            raw_text,
+        )
+        self.assertNotIn("unsafe", result.message)
+
+    def test_truncated_response_uses_stable_reason(self) -> None:
+        self._classified()
+        adapter = InspectingAdapter(self.state_store)
+        adapter.error = ModelResponseTruncated(
+            "model_response_truncated",
+            "unsafe truncated detail",
+            model_id="claude-returned-model",
+            raw_text='{"title":"partial',
+        )
+
+        result = self._service(adapter).propose(CAPTURE_ID)
+
+        self._assert_recorded_attempt_failure(result, "model_response_truncated")
+        self.assertIsNotNone(result.raw_response_path)
+
+    def test_unsupported_response_uses_invalid_reason(self) -> None:
+        self._classified()
+        adapter = InspectingAdapter(self.state_store)
+        adapter.error = UnsupportedModelResponse(
+            "model_response_invalid",
+            "unsafe shape detail",
+            model_id="claude-returned-model",
+            raw_text='{"unexpected":true}',
+        )
+
+        result = self._service(adapter).propose(CAPTURE_ID)
+
+        self._assert_recorded_attempt_failure(result, "model_response_invalid")
+        self.assertIsNotNone(result.raw_response_path)
+
+    def test_invalid_response_is_preserved_then_recorded_failed(self) -> None:
+        self._classified()
+        adapter = InspectingAdapter(self.state_store, "not json")
+
+        result = self._service(adapter).propose(CAPTURE_ID)
+
+        self._assert_recorded_attempt_failure(result, "model_response_invalid")
+        self.assertEqual(
+            (self.runtime_root / result.raw_response_path).read_text(encoding="utf-8"),
+            "not json",
+        )
+
+    def test_unsafe_content_is_refused_without_echo_or_draft(self) -> None:
+        self._classified()
+        secret = "sk-abcdefghijklmnop"
+        adapter = InspectingAdapter(
+            self.state_store,
+            json.dumps(
+                {
+                    "title": "Unsafe",
+                    "body": f"Do not write {secret}",
+                    "reason": "Provider supplied unsafe content.",
+                    "uncertainties": [],
+                }
+            ),
+        )
+
+        result = self._service(adapter).propose(CAPTURE_ID)
+
+        self.assertEqual(result.status, ProposalStatus.REFUSED)
+        self.assertEqual(result.reason, "proposal_content_failed")
+        self.assertNotIn(secret, result.message)
+        self.assertFalse((self.runtime_root / "vault").exists())
+        self.assertIsNone(self.state_store.find_proposal_by_capture_id(CAPTURE_ID))
+        self.assertEqual(
+            self.state_store.find_intake_by_capture_id(CAPTURE_ID).failure_reason,
+            "proposal.proposal_content_failed",
+        )
+
+    def test_partial_proposal_evidence_is_preserved_and_fails_closed(self) -> None:
+        self._classified()
+        partial = self.runtime_root / "proposal-evidence" / PROPOSAL_ID
+        partial.mkdir(parents=True)
+        (partial / "partial.txt").write_text("preserve", encoding="utf-8")
+
+        result = self._service(InspectingAdapter(self.state_store)).propose(CAPTURE_ID)
+
+        self._assert_recorded_attempt_failure(result, "proposal_evidence_failed")
+        self.assertEqual((partial / "partial.txt").read_text(), "preserve")
+        self.assertIsNone(result.raw_response_path)
+
+    def test_partial_proposal_content_is_preserved_and_fails_closed(self) -> None:
+        self._classified()
+        partial = self.runtime_root / "proposal-content" / PROPOSAL_ID
+        partial.mkdir(parents=True)
+        (partial / "partial.txt").write_text("preserve", encoding="utf-8")
+
+        result = self._service(InspectingAdapter(self.state_store)).propose(CAPTURE_ID)
+
+        self._assert_recorded_attempt_failure(result, "proposal_content_failed")
+        self.assertEqual((partial / "partial.txt").read_text(), "preserve")
+        self.assertIsNotNone(result.raw_response_path)
+        self.assertIsNone(result.content_path)
+
+    def test_proposal_persistence_failure_is_recorded(self) -> None:
+        self._classified()
+        failing = FailingStateStore(self.state_store, "complete_proposal")
+
+        result = self._service(
+            InspectingAdapter(self.state_store),
+            state_store=failing,
+        ).propose(CAPTURE_ID)
+
+        self._assert_recorded_attempt_failure(result, "proposal_persistence_failed")
+        self.assertIsNotNone(result.raw_response_path)
+        self.assertIsNotNone(result.content_path)
+
+    def test_existing_draft_is_a_collision_and_records_draft_failure(self) -> None:
+        self._classified()
+        draft = self.runtime_root / "vault" / "notes" / "proposed"
+        draft.mkdir(parents=True)
+        path = draft / f"note.{CAPTURE_ID}.md"
+        path.write_text("preexisting", encoding="utf-8")
+
+        result = self._service(InspectingAdapter(self.state_store)).propose(CAPTURE_ID)
+
+        self.assertEqual(result.status, ProposalStatus.FAILED)
+        self.assertEqual(result.reason, "draft_collision")
+        self.assertEqual(path.read_text(encoding="utf-8"), "preexisting")
+        intake = self.state_store.find_intake_by_capture_id(CAPTURE_ID)
+        self.assertEqual(intake.state, "failed")
+        self.assertEqual(intake.failure_reason, "proposal.draft_collision")
+        self.assertIsNotNone(self.state_store.find_proposal_by_capture_id(CAPTURE_ID))
+
+    def test_draft_write_failure_is_recorded_without_unsafe_detail(self) -> None:
+        self._classified()
+
+        result = self._service(
+            InspectingAdapter(self.state_store),
+            draft_store=FailingDraftStore(),
+        ).propose(CAPTURE_ID)
+
+        self.assertEqual(result.status, ProposalStatus.FAILED)
+        self.assertEqual(result.reason, "draft_write_failed")
+        self.assertNotIn("unsafe", result.message)
+        intake = self.state_store.find_intake_by_capture_id(CAPTURE_ID)
+        self.assertEqual(intake.state, "failed")
+        self.assertEqual(intake.failure_reason, "proposal.draft_write_failed")
+
+    def test_failure_recording_failure_reports_state_undetermined(self) -> None:
+        self._classified()
+        adapter = InspectingAdapter(self.state_store, "not json")
+        failing = FailingStateStore(self.state_store, "record_proposal_failure")
+
+        result = self._service(adapter, state_store=failing).propose(CAPTURE_ID)
+
+        self.assertEqual(result.status, ProposalStatus.FAILED)
+        self.assertEqual(result.reason, "proposal_state_undetermined")
+        self.assertNotIn("unsafe", result.message)
+
+    def test_state_load_failure_reports_state_undetermined(self) -> None:
+        failing = FailingStateStore(
+            self.state_store,
+            "find_intake_by_capture_id",
+        )
+
+        result = self._service(
+            InspectingAdapter(self.state_store),
+            state_store=failing,
+        ).propose(CAPTURE_ID)
+
+        self.assertEqual(result.status, ProposalStatus.FAILED)
+        self.assertEqual(result.reason, "proposal_state_undetermined")
+
+    def _assert_recorded_attempt_failure(self, result, reason: str) -> None:
+        self.assertEqual(result.status, ProposalStatus.FAILED)
+        self.assertEqual(result.reason, reason)
+        intake = self.state_store.find_intake_by_capture_id(CAPTURE_ID)
+        self.assertEqual(intake.state, "failed")
+        self.assertEqual(intake.failure_reason, f"proposal.{reason}")
+        reservation = self.state_store.find_proposal_reservation_by_capture_id(
+            CAPTURE_ID
+        )
+        self.assertIsNotNone(reservation)
+        self.assertEqual(reservation.proposal_id, PROPOSAL_ID)
+        self.assertEqual(reservation.lease_expires_at, PROPOSED_AT)
 
 
 if __name__ == "__main__":

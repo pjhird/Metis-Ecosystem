@@ -31,6 +31,10 @@ class ProposalContentError(ValueError):
     """Raised when model-supplied proposal content is not safe and valid."""
 
 
+class ProposalContentPolicyRefusal(ProposalContentError):
+    """Raised when otherwise parseable content violates a safety policy."""
+
+
 @dataclass(frozen=True)
 class SemanticProposal:
     title: str
@@ -143,7 +147,9 @@ def _reject_credentials(value: str) -> None:
         or TOKEN_PATTERN.search(value)
         or ASSIGNMENT_PATTERN.search(value)
     ):
-        raise ProposalContentError("proposal content violates credential policy")
+        raise ProposalContentPolicyRefusal(
+            "proposal content violates credential policy"
+        )
 
 
 def _reject_unsafe_markdown(body: str) -> None:
@@ -155,4 +161,6 @@ def _reject_unsafe_markdown(body: str) -> None:
         or "[[" in body
         or "data:" in body.lower()
     ):
-        raise ProposalContentError("proposal content violates Markdown policy")
+        raise ProposalContentPolicyRefusal(
+            "proposal content violates Markdown policy"
+        )
