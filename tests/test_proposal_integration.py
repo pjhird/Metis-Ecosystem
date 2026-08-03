@@ -12,7 +12,7 @@ from metis.data_access import SQLiteStateStore
 from metis.draft_notes import DraftNoteStore, DraftStatus, render_proposed_draft
 from metis.model_adapters import ModelResponse
 
-from tests.data_access.inspection import table_row_count
+from tests.data_access.inspection import audit_event_rows, table_row_count
 
 
 CLASSIFICATION_RAW = (
@@ -87,7 +87,22 @@ class ProposalIntegrationTests(unittest.TestCase):
                 self.assertEqual(table_row_count(store, "proposal"), 1)
                 self.assertEqual(table_row_count(store, "proposal_reservation"), 0)
                 self.assertEqual(table_row_count(store, "approval"), 0)
-                self.assertEqual(table_row_count(store, "audit_event"), 0)
+                # One event per transition, and the replay is a refused write.
+                self.assertEqual(
+                    tuple(
+                        (event.action, event.outcome)
+                        for event in audit_event_rows(store)
+                    ),
+                    (
+                        ("capture.written", "success"),
+                        ("classification.started", "success"),
+                        ("classification.completed", "success"),
+                        ("proposal.reserved", "success"),
+                        ("proposal.recorded", "success"),
+                        ("draft.registered", "success"),
+                        ("command.propose", "refused"),
+                    ),
+                )
 
                 body = (root / proposal.body_path).read_bytes()
                 draft = DraftNoteStore(root).validate(

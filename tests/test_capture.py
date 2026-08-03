@@ -59,7 +59,12 @@ class InMemoryStateStore:
             return None
         return self.record
 
-    def register_intake(self, record: IntakeRecord) -> IntakeRegistrationResult:
+    def append_audit_event(self, record) -> None:
+        """Emission is asserted against the real store, not this fake."""
+
+    def register_intake(
+        self, record: IntakeRecord, *, audit=None
+    ) -> IntakeRegistrationResult:
         self.record = record
         return IntakeRegistrationResult(IntakeRegistrationStatus.REGISTERED, record)
 
@@ -84,7 +89,9 @@ class RegistrationFailingStateStore(InMemoryStateStore):
         self._runtime_root = runtime_root
         self.evidence_bytes_at_registration: Optional[dict[str, bytes]] = None
 
-    def register_intake(self, record: IntakeRecord) -> IntakeRegistrationResult:
+    def register_intake(
+        self, record: IntakeRecord, *, audit=None
+    ) -> IntakeRegistrationResult:
         directory = self._runtime_root / record.evidence_path
         self.evidence_bytes_at_registration = {
             "raw.txt": (directory / "raw.txt").read_bytes(),
@@ -99,7 +106,9 @@ class LateDuplicateStateStore(InMemoryStateStore):
         self._runtime_root = runtime_root
         self.evidence_bytes_at_registration: Optional[dict[str, bytes]] = None
 
-    def register_intake(self, record: IntakeRecord) -> IntakeRegistrationResult:
+    def register_intake(
+        self, record: IntakeRecord, *, audit=None
+    ) -> IntakeRegistrationResult:
         directory = self._runtime_root / record.evidence_path
         self.evidence_bytes_at_registration = {
             "raw.txt": (directory / "raw.txt").read_bytes(),
@@ -113,7 +122,9 @@ class OrphanMismatchStateStore(InMemoryStateStore):
         super().__init__()
         self._existing = existing
 
-    def register_intake(self, record: IntakeRecord) -> IntakeRegistrationResult:
+    def register_intake(
+        self, record: IntakeRecord, *, audit=None
+    ) -> IntakeRegistrationResult:
         return IntakeRegistrationResult(
             IntakeRegistrationStatus.DUPLICATE,
             self._existing,
@@ -130,7 +141,12 @@ class FailOnceRegistrationStore:
     ) -> Optional[IntakeRecord]:
         return self._store.find_intake_by_content_hash(content_hash)
 
-    def register_intake(self, record: IntakeRecord) -> IntakeRegistrationResult:
+    def append_audit_event(self, record) -> None:
+        """Emission is asserted against the real store, not this fake."""
+
+    def register_intake(
+        self, record: IntakeRecord, *, audit=None
+    ) -> IntakeRegistrationResult:
         if self._should_fail:
             self._should_fail = False
             raise StateStoreError("simulated first registration failure")
@@ -171,7 +187,9 @@ class FinalizationCheckingStateStore(InMemoryStateStore):
         self._runtime_root = runtime_root
         self._evidence_store = evidence_store
 
-    def register_intake(self, record: IntakeRecord) -> IntakeRegistrationResult:
+    def register_intake(
+        self, record: IntakeRecord, *, audit=None
+    ) -> IntakeRegistrationResult:
         directory = self._runtime_root / record.evidence_path
         self._test_case.assertTrue((directory / "raw.txt").is_file())
         self._test_case.assertTrue((directory / "meta.json").is_file())
@@ -611,7 +629,9 @@ class CaptureServiceTests(unittest.TestCase):
         self.assertEqual(second.capture_id, first.capture_id)
         self.assertEqual(second.evidence_path, first.evidence_path)
         self.assertEqual(id_calls, 1)
-        self.assertEqual(clock_calls, 1)
+        # The retry reuses the orphan's own timestamp rather than reading the
+        # clock again; audit emission also reads this clock, so the proof is
+        # the recorded value below, not the number of reads.
         self.assertEqual(
             sqlite_store.find_intake_by_content_hash(orphan.content_hash).captured_at,
             CAPTURED_AT_TEXT,

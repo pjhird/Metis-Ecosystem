@@ -87,7 +87,10 @@ The recorded verification used deterministic fake-adapter integration tests and 
 
 `metis file <capture_id>` performs the permanent write. It refuses unless the intake is `approved` with an uncommitted approval record, revalidates the whole evidence chain and the draft bytes, resolves every link against an existing note's `id` in `vault/goals/` or `vault/projects/`, and only then writes `vault/notes/filed/note.<capture_id>.md` and marks the intake `filed`. An unresolvable or absent link blocks the write without invalidating the approval — add the link and run it again. `filed`, `duplicate`, and `refused` use standard output and exit 0; `failed` uses standard error and exits 1.
 
-Audit events (`metis status`) are not implemented; that is build-order step 7.
+Every material transition now writes one append-only `audit_event` in the same transaction as the
+transition it records, and every refusal, duplicate, or failure that transitions nothing writes one of its
+own. `refused` is a first-class outcome: a blocked unapproved write is recorded as successful enforcement,
+not as an error. There is no read command for the trail yet — `metis status` remains unimplemented.
 
 ## How Claude Code and Codex Get the Information
 

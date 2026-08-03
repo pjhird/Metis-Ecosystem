@@ -424,13 +424,15 @@ class ApprovalServiceTests(unittest.TestCase):
             "awaiting_approval",
         )
 
-    def test_approval_emits_no_audit_event_or_permanent_note(self) -> None:
+    def test_approval_emits_one_audit_event_and_no_permanent_note(self) -> None:
         self._awaiting_approval()
         self._set_draft_status("approved")
 
         self._service().review()
 
-        self.assertEqual(table_row_count(self.store, "audit_event"), 0)
+        # The fixture drives the store directly and audits nothing, so the one
+        # event here is the decision the service itself recorded.
+        self.assertEqual(table_row_count(self.store, "audit_event"), 1)
         self.assertFalse((self.root / "vault" / "notes" / "filed").exists())
         self.assertEqual(
             sorted(

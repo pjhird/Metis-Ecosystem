@@ -9,7 +9,11 @@ from pathlib import Path
 
 from metis.cli import main
 from metis.data_access import SQLiteStateStore
-from tests.data_access.inspection import approval_rows, table_row_count
+from tests.data_access.inspection import (
+    approval_rows,
+    audit_event_rows,
+    table_row_count,
+)
 from tests.test_proposal_integration import PipelineAdapter
 
 
@@ -64,8 +68,12 @@ class FilingIntegrationTests(unittest.TestCase):
                 self.assertEqual(rows[0].committed_at, filed["committed_at"])
                 self.assertIsNone(rows[0].revoked_at)
                 self.assertEqual(table_row_count(store, "approval"), 1)
-                # Audit emission is Step 7 and must not have crept in early.
-                self.assertEqual(table_row_count(store, "audit_event"), 0)
+                # One event per transition; the trail is the state path this
+                # capture walked. Its exact shape is asserted in test_audit.
+                trail = audit_event_rows(store)
+                self.assertEqual(len(trail), 8)
+                self.assertEqual(trail[-1].action, "note.committed")
+                self.assertEqual(trail[-1].outcome, "success")
 
             self.assertEqual(adapter.classification_calls, 1)
             self.assertEqual(adapter.proposal_calls, 1)
@@ -103,6 +111,15 @@ class FilingIntegrationTests(unittest.TestCase):
                 self.assertEqual(table_row_count(store, "intake"), 1)
                 self.assertEqual(table_row_count(store, "proposal"), 1)
                 self.assertEqual(table_row_count(store, "approval"), 1)
+                trail = audit_event_rows(store)
+                self.assertEqual(
+                    [event.action for event in trail].count("note.committed"),
+                    1,
+                )
+                self.assertEqual(
+                    (trail[-1].action, trail[-1].outcome),
+                    ("command.file", "refused"),
+                )
             self.assertEqual(adapter.classification_calls, 1)
             self.assertEqual(adapter.proposal_calls, 1)
 

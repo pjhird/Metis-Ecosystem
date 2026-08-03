@@ -1,6 +1,19 @@
 """Test-only operational-state inspection kept inside the SQL boundary."""
 
-from metis.data_access import ApprovalRecord
+from metis.data_access import ApprovalRecord, AuditEventRecord
+
+
+def audit_event_rows(store) -> list[AuditEventRecord]:
+    """Return the whole audit trail in append order.
+
+    ULIDs share a millisecond and break ties randomly, so the append order of
+    an append-only table is the only faithful reading of emission order.
+    """
+    rows = store._connection.execute(
+        "SELECT event_id, trace_id, capture_id, actor, action, outcome, detail, "
+        "created_at FROM audit_event ORDER BY rowid"
+    ).fetchall()
+    return [AuditEventRecord(*row) for row in rows]
 
 
 def approval_rows(store) -> list[ApprovalRecord]:

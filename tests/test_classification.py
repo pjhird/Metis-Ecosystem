@@ -86,7 +86,12 @@ class FakeStateStore:
         self.calls.append("find_classification")
         return self.classification
 
-    def begin_classification(self, capture_id: str, started_at: str) -> IntakeRecord:
+    def append_audit_event(self, record) -> None:
+        """Emission is asserted against the real store, not this fake."""
+
+    def begin_classification(
+        self, capture_id: str, started_at: str, *, audit=None
+    ) -> IntakeRecord:
         self.calls.append("begin")
         assert self.intake is not None
         self.intake = replace(
@@ -98,7 +103,7 @@ class FakeStateStore:
         return self.intake
 
     def complete_classification(
-        self, record: ClassificationRecord
+        self, record: ClassificationRecord, *, audit=None
     ) -> ClassificationRecord:
         self.calls.append("complete")
         response_directory = (self.runtime_root / record.raw_response_path).parent
@@ -116,7 +121,7 @@ class FakeStateStore:
         return record
 
     def record_classification_failure(
-        self, capture_id: str, reason: str, failed_at: str
+        self, capture_id: str, reason: str, failed_at: str, *, audit=None
     ) -> IntakeRecord:
         self.calls.append("record_failure")
         if self.required_failure_evidence_path is not None:

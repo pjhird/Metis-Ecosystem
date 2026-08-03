@@ -8,6 +8,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable, Optional, Tuple
 
+from .audit import OUTCOMES, AuditTrail
 from .data_access import (
     ApprovalRecord,
     IntakeRecord,
@@ -84,6 +85,7 @@ class ApprovalService:
         self._runtime_root = Path(runtime_root)
         self._id_factory = id_factory
         self._clock = clock
+        self._audit = AuditTrail(state_store, clock=clock)
 
     def review(self) -> ApprovalRunResult:
         try:
@@ -208,8 +210,38 @@ class ApprovalService:
             revoked_at=None,
         )
         try:
-            updated = self._state_store.record_approval(record)
-        except (StateStoreError, StateTransitionRefused):
+            updated = self._state_store.record_approval(
+                record,
+                audit=self._audit.event(
+                    "approval.detected",
+                    "success",
+                    capture_id=intake.capture_id,
+                    actor=APPROVER,
+                    detail={
+                        "state": observed,
+                        "decision": observed,
+                        "approval_id": approval_id,
+                    },
+                ),
+            )
+        except StateTransitionRefused:
+            # The transaction rolled back, so its event did not ride with it.
+            # A refused transition is a refusal even where the command fails.
+            self._audit.record(
+                "approval.detected",
+                "refused",
+                capture_id=intake.capture_id,
+                actor=APPROVER,
+                detail={"reason": "approval_state_undetermined"},
+            )
+            return self._failed(
+                intake,
+                proposal,
+                "approval_state_undetermined",
+                "the decision could not be recorded",
+                audited=True,
+            )
+        except StateStoreError:
             return self._failed(
                 intake,
                 proposal,
@@ -222,6 +254,7 @@ class ApprovalService:
                 proposal,
                 "approval_state_undetermined",
                 "the decision could not be recorded",
+                audited=True,
             )
         return ApprovalResult(
             status=ApprovalStatus(observed),
@@ -279,7 +312,17 @@ class ApprovalService:
         proposal: Optional[ProposalRecord],
         reason: str,
         message: str,
+        *,
+        audited: bool = False,
     ) -> ApprovalResult:
+        if not audited:
+            # This outcome rode no transition, so it carries its own event.
+            self._audit.record(
+                "command.approvals",
+                OUTCOMES[ApprovalStatus.FAILED.value],
+                capture_id=intake.capture_id,
+                detail={"status": ApprovalStatus.FAILED.value, "reason": reason},
+            )
         return ApprovalResult(
             status=ApprovalStatus.FAILED,
             capture_id=intake.capture_id,

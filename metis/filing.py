@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable, Optional, Tuple
 from uuid import UUID
 
+from .audit import OUTCOMES, AuditTrail
 from .classification_evidence import ClassificationEvidenceStore
 from .data_access import (
     ApprovalRecord,
@@ -83,6 +84,7 @@ class FilingService:
         self._filed_store = filed_store
         self._runtime_root = Path(runtime_root)
         self._clock = clock
+        self._audit = AuditTrail(state_store, clock=clock)
 
     def file(self, capture_id: str) -> FilingResult:
         if not _is_capture_id(capture_id):
@@ -110,6 +112,17 @@ class FilingService:
                 "no capture is registered under this ID",
             )
         if intake.state not in ("approved", "filed"):
+            # A blocked unapproved write is successful enforcement (§2.6).
+            self._audit.record(
+                "command.file",
+                "refused",
+                capture_id=capture_id,
+                detail={
+                    "status": FilingStatus.REFUSED.value,
+                    "reason": "filing.not_approved",
+                    "intake_state": intake.state,
+                },
+            )
             return FilingResult(
                 status=FilingStatus.REFUSED,
                 capture_id=capture_id,
@@ -310,8 +323,35 @@ class FilingService:
                 proposal.proposal_id,
                 approval.approval_id,
                 committed_at,
+                audit=self._audit.event(
+                    "note.committed",
+                    "success",
+                    capture_id=intake.capture_id,
+                    detail={
+                        "state": "filed",
+                        "filed_path": filed_path,
+                        "links": list(links),
+                    },
+                ),
             )
-        except (StateStoreError, StateTransitionRefused):
+        except StateTransitionRefused:
+            # The transaction rolled back, so its event did not ride with it.
+            self._audit.record(
+                "note.committed",
+                "refused",
+                capture_id=intake.capture_id,
+                detail={"reason": "filing.state_undetermined"},
+            )
+            return self._failed(
+                intake.capture_id,
+                "filing.state_undetermined",
+                "the permanent note is written but its transition was not "
+                "recorded; re-run to complete it",
+                proposal_id=proposal.proposal_id,
+                intake_state=intake.state,
+                audited=True,
+            )
+        except StateStoreError:
             return self._failed(
                 intake.capture_id,
                 "filing.state_undetermined",
@@ -351,6 +391,15 @@ class FilingService:
                 proposal_id=proposal.proposal_id,
                 intake_state=intake.state,
             )
+        self._audit.record(
+            "command.file",
+            OUTCOMES[FilingStatus.DUPLICATE.value],
+            capture_id=intake.capture_id,
+            detail={
+                "status": FilingStatus.DUPLICATE.value,
+                "reason": "already_filed",
+            },
+        )
         return FilingResult(
             status=FilingStatus.DUPLICATE,
             capture_id=intake.capture_id,
@@ -475,7 +524,16 @@ class FilingService:
         *,
         proposal_id: Optional[str] = None,
         intake_state: Optional[str] = None,
+        audited: bool = False,
     ) -> FilingResult:
+        if not audited:
+            # This outcome rode no transition, so it carries its own event.
+            self._audit.record(
+                "command.file",
+                OUTCOMES[FilingStatus.FAILED.value],
+                capture_id=capture_id,
+                detail={"status": FilingStatus.FAILED.value, "reason": reason},
+            )
         return FilingResult(
             status=FilingStatus.FAILED,
             capture_id=capture_id,

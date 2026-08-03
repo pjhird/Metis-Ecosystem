@@ -24,6 +24,7 @@ from metis.proposal_contract import parse_proposal_response, render_proposal_bod
 from metis.proposal_evidence import ProposalEvidenceStore
 
 from tests.data_access.inspection import (
+    audit_event_rows,
     force_intake_state,
     force_proposal_reservation_timestamps,
     table_row_count,
@@ -1191,6 +1192,8 @@ class ProposalRecoveryTests(unittest.TestCase):
         self.assertIsNone(
             self.state_store.find_proposal_reservation_by_capture_id(CAPTURE_ID)
         )
+        actions = [event.action for event in audit_event_rows(self.state_store)]
+        self.assertEqual(actions.count("proposal.reclaimed"), 1)
 
     def test_complete_response_and_content_resume_without_model_call(self):
         self._reserve(expires_at="2026-08-02T20:15:00Z")
@@ -1286,6 +1289,9 @@ class ProposalRecoveryTests(unittest.TestCase):
         self.assertEqual(result.status, ProposalStatus.PROPOSED)
         self.assertEqual(result.intake_state, "awaiting_approval")
         self.assertEqual(adapter.calls, 0)
+        actions = [event.action for event in audit_event_rows(self.state_store)]
+        self.assertEqual(actions.count("draft.failed"), 1)
+        self.assertEqual(actions.count("proposal.resumed"), 1)
 
     def test_exact_unregistered_draft_is_registered_not_rewritten(self):
         crashing_state = RegistrationCrashStore(self.state_store)

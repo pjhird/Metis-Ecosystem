@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Callable, Optional
 from uuid import UUID, uuid4
 
+from .audit import OUTCOMES, AuditTrail
 from .classification import ROUTING, parse_classification_response
 from .classification_evidence import (
     ClassificationEvidenceError,
@@ -206,6 +207,7 @@ class ProposalService:
         self._id_factory = id_factory
         self._lease_token_factory = lease_token_factory
         self._clock = clock
+        self._audit = AuditTrail(state_store, clock=clock)
 
     def propose(self, capture_id: str) -> ProposalResult:
         if not self._is_uuid4(capture_id):
@@ -357,7 +359,15 @@ class ProposalService:
             lease_expires_at=self._timestamp(now + timedelta(minutes=15)),
         )
         try:
-            self._state_store.begin_proposal(reservation)
+            self._state_store.begin_proposal(
+                reservation,
+                audit=self._audit.event(
+                    "proposal.reserved",
+                    "success",
+                    capture_id=capture_id,
+                    detail={"state": "proposing", "proposal_id": proposal_id},
+                ),
+            )
         except StateTransitionRefused:
             return self._resolve_begin_loss(capture_id)
         except StateStoreError:
@@ -549,7 +559,16 @@ class ProposalService:
             created_at=reserved_at,
         )
         try:
-            self._state_store.complete_proposal(record, lease_token)
+            self._state_store.complete_proposal(
+                record,
+                lease_token,
+                audit=self._audit.event(
+                    "proposal.recorded",
+                    "success",
+                    capture_id=capture_id,
+                    detail={"state": "proposed", "proposal_id": proposal_id},
+                ),
+            )
         except (StateStoreError, StateTransitionRefused):
             return self._fail_reserved(
                 capture_id, classification, proposal_id, lease_token,
@@ -596,6 +615,15 @@ class ProposalService:
                 proposal_id,
                 draft.draft_path,
                 reserved_at,
+                audit=self._audit.event(
+                    "draft.registered",
+                    "success",
+                    capture_id=capture_id,
+                    detail={
+                        "state": "awaiting_approval",
+                        "draft_note_path": draft.draft_path,
+                    },
+                ),
             )
         except (StateStoreError, StateTransitionRefused):
             return self._fail_draft(
@@ -658,6 +686,7 @@ class ProposalService:
             content_path=content.content_path,
             draft_path=draft.draft_path,
             intake_state=final_intake.state,
+            audited=True,
         )
 
     def _replay(
@@ -768,6 +797,15 @@ class ProposalService:
                     intake.capture_id,
                     proposal.proposal_id,
                     now,
+                    audit=self._audit.event(
+                        "proposal.resumed",
+                        "success",
+                        capture_id=intake.capture_id,
+                        detail={
+                            "state": "proposed",
+                            "proposal_id": proposal.proposal_id,
+                        },
+                    ),
                 )
             except (StateStoreError, StateTransitionRefused):
                 return self._state_undetermined(
@@ -830,6 +868,15 @@ class ProposalService:
                 proposal.proposal_id,
                 draft.draft_path,
                 now,
+                audit=self._audit.event(
+                    "draft.registered",
+                    "success",
+                    capture_id=intake.capture_id,
+                    detail={
+                        "state": "awaiting_approval",
+                        "draft_note_path": draft.draft_path,
+                    },
+                ),
             )
             final_intake = self._state_store.find_intake_by_capture_id(
                 intake.capture_id
@@ -886,6 +933,7 @@ class ProposalService:
             content_path=proposal.body_path,
             draft_path=draft.draft_path,
             intake_state=final_intake.state,
+            audited=True,
         )
 
     def _recover_reservation(
@@ -958,6 +1006,15 @@ class ProposalService:
                 reservation,
                 replacement,
                 self._timestamp(now),
+                audit=self._audit.event(
+                    "proposal.reclaimed",
+                    "success",
+                    capture_id=intake.capture_id,
+                    detail={
+                        "state": "proposing",
+                        "proposal_id": reservation.proposal_id,
+                    },
+                ),
             )
         except StateTransitionRefused:
             return self._state_undetermined(
@@ -1174,7 +1231,19 @@ class ProposalService:
             content,
         )
         try:
-            self._state_store.complete_proposal(record, reservation.lease_token)
+            self._state_store.complete_proposal(
+                record,
+                reservation.lease_token,
+                audit=self._audit.event(
+                    "proposal.recorded",
+                    "success",
+                    capture_id=reservation.capture_id,
+                    detail={
+                        "state": "proposed",
+                        "proposal_id": reservation.proposal_id,
+                    },
+                ),
+            )
             intake = self._state_store.find_intake_by_capture_id(
                 reservation.capture_id
             )
@@ -1512,6 +1581,12 @@ class ProposalService:
                 self._timestamp(
                     self._clock().astimezone(timezone.utc).replace(microsecond=0)
                 ),
+                audit=self._audit.event(
+                    "proposal.failed",
+                    OUTCOMES[status.value],
+                    capture_id=capture_id,
+                    detail={"state": "failed", "reason": f"proposal.{reason}"},
+                ),
             )
         except (
             AttributeError,
@@ -1545,6 +1620,7 @@ class ProposalService:
             intake_state=failed.state,
             reason=reason,
             message=message,
+            audited=True,
         )
 
     def _fail_draft(
@@ -1564,6 +1640,12 @@ class ProposalService:
                 f"proposal.{reason}",
                 self._timestamp(
                     self._clock().astimezone(timezone.utc).replace(microsecond=0)
+                ),
+                audit=self._audit.event(
+                    "draft.failed",
+                    "failure",
+                    capture_id=proposal.capture_id,
+                    detail={"state": "failed", "reason": f"proposal.{reason}"},
                 ),
             )
         except (
@@ -1598,6 +1680,7 @@ class ProposalService:
             intake_state=failed.state,
             reason=reason,
             message="proposal failed",
+            audited=True,
         )
 
     def _consistency_failure(
@@ -1864,7 +1947,16 @@ class ProposalService:
         intake_state: Optional[str] = None,
         reason: Optional[str] = None,
         message: Optional[str] = None,
+        audited: bool = False,
     ) -> ProposalResult:
+        if not audited:
+            # This outcome rode no transition, so it carries its own event.
+            self._audit.record(
+                "command.propose",
+                OUTCOMES[status.value],
+                capture_id=capture_id,
+                detail={"status": status.value, "reason": reason},
+            )
         return ProposalResult(
             status=status,
             capture_id=capture_id,
