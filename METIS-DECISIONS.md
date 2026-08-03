@@ -491,6 +491,56 @@ bounded, human-confirmed way to suggest links — which would be a new record, n
 
 ---
 
+## ADR-021 — Planning notes are created through pinned capture
+
+**Context.** ADR-020 assumed goal and project notes are hand-authored in Obsidian, and filing requires links
+to those notes (REQ-INTK-004). That unblocks the MVP only if a human already seeded `vault/goals/` and
+`vault/projects/`. Blueprint Phase 6 requires turning approved knowledge into planning relationships; the
+first slice is a governed way to *create* goals and projects without a second approval surface or trusting
+the classifier to invent planning identity.
+
+Three shapes were considered: (1) extend classify so the model may emit `goal` / `project`; (2) dedicated
+`metis propose-goal` / `propose-project` commands; (3) keep one capture → classify → propose → approve → file
+pipeline and let the human pin type at capture with `--as`.
+
+**Decision.** Adopt the hybrid (3).
+
+- `metis capture --as goal "<text>"` and `metis capture --as project --goal <goal-id> "<text>"` pin the
+  effective note type before any model call. The pin is durable capture metadata and **overrides** any
+  classifier `candidate_type`.
+- Classification still runs for sensitivity and confidence; it does not choose planning identity.
+- Approval remains Obsidian draft `status` (ADR-005 / ADR-020). Editable fields stay `status` and `links` only.
+- Filing routes by effective type: `goal` → `vault/goals/`, `project` → `vault/projects/`, other typed notes →
+  `vault/notes/filed/` as today.
+- Goal and project notes carry provenance (`capture_id`, `evidence`) like other approved notes (REQ-VLT-004).
+- A **goal** may file with empty `links` (bootstrap). A **project** requires `--goal` at capture; the parent
+  is written by the system as a `goal: "[[…]]"` field on the note (not human-editable under ADR-020) and must
+  resolve to an existing goal at file time. Project drafts may use `links: []`.
+- Plain `metis capture` (no `--as`) is unchanged: classifier-owned types, ≥1 resolvable link to file.
+- Separate `propose-goal` / `propose-project` pipelines are not adopted; thin aliases may wrap `--as` later.
+- Outcomes, tasks, dependencies, and decompose-project remain out of scope for this record.
+
+This narrows ADR-015 (typed CLI capture remains the first input; flags extend it) and supersedes the schema
+prose under ADR-020 that “Metis does not create goal or project notes.” ADR-020’s two editable fields are
+unchanged.
+
+**Alternatives.** Classifier-selected goals (rejected: planning identity is owner intent, not a model
+proposal). Dedicated propose commands as a second pipeline (rejected for now: duplicates orchestrator surface;
+may return as aliases). Bootstrap-only `metis init` seed files outside approval (rejected: weakens ADR-004).
+
+**Consequences.** Clean installs can create the first goal through the governed loop. Filing, audit, and
+idempotency stay on the existing services with type-aware rendering and destinations. Schemas §4.1–§4.3 must
+gain provenance on planning notes and type-specific link rules. Implementation is blocked until this ADR
+merges (ADR-019).
+
+**Reversal path.** Remove `--as` and resume hand-authored goals/projects; filed planning notes remain valid
+vault content.
+
+**Revisit if.** Volume demands richer planning commands, or Phase 6 task/outcome models need a different
+creation path — that is a new ADR, not a quiet widening of `--as`.
+
+---
+
 ## Decision Summary
 
 | ID | Decision | Status |
@@ -515,6 +565,7 @@ bounded, human-confirmed way to suggest links — which would be a new record, n
 | ADR-018 | Vector and graph databases deferred | Deferred |
 | ADR-019 | Git is the governance layer for code | Adopted |
 | ADR-020 | Draft `status` and `links` are human-editable | Adopted |
+| ADR-021 | Planning notes via pinned capture (`--as`) | Adopted |
 
 Adopted means chosen and to be built. Deferred means chosen *not* to be built yet, with a stated trigger.
 Neither means implemented.
