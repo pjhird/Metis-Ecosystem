@@ -20,6 +20,7 @@ from .classification_evidence import ClassificationEvidenceStore
 from .data_access import SQLiteStateStore
 from .draft_notes import DraftNoteStore
 from .evidence import EvidenceStore
+from .filing import FilingResult, FilingService, FilingStatus
 from .proposal import ProposalResult, ProposalService, ProposalStatus
 from .proposal_content import ProposalContentStore
 from .proposal_evidence import ProposalEvidenceStore
@@ -40,6 +41,8 @@ def main(
     propose_parser = subparsers.add_parser("propose")
     propose_parser.add_argument("capture_id")
     subparsers.add_parser("approvals")
+    file_parser = subparsers.add_parser("file")
+    file_parser.add_argument("capture_id")
     arguments = parser.parse_args(argv)
 
     root = Path.cwd() if runtime_root is None else Path(runtime_root)
@@ -73,6 +76,17 @@ def main(
                     DraftNoteStore(root),
                     root,
                 ).review()
+            elif arguments.command == "file":
+                result = FilingService(
+                    state_store,
+                    EvidenceStore(root),
+                    ClassificationEvidenceStore(root),
+                    ProposalEvidenceStore(root),
+                    ProposalContentStore(root),
+                    DraftNoteStore(root),
+                    DraftNoteStore(root, stage="filed"),
+                    root,
+                ).file(arguments.capture_id)
             else:
                 if model_adapter_factory is None:
                     from .model_adapters.claude import ClaudeModelAdapter
@@ -118,6 +132,19 @@ def main(
             result = ApprovalRunResult(
                 status=ApprovalRunStatus.FAILED,
                 decisions=(),
+                reason="state_initialization_failed",
+                message="state initialization failed",
+            )
+        elif arguments.command == "file":
+            result = FilingResult(
+                status=FilingStatus.FAILED,
+                capture_id=arguments.capture_id,
+                proposal_id=None,
+                approval_id=None,
+                filed_path=None,
+                links=(),
+                committed_at=None,
+                intake_state=None,
                 reason="state_initialization_failed",
                 message="state initialization failed",
             )

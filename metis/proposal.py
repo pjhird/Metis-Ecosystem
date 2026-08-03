@@ -108,6 +108,77 @@ class ProposalResult:
     message: Optional[str]
 
 
+def validated_prior_state(
+    evidence_store: EvidenceStore,
+    classification_store: ClassificationEvidenceStore,
+    runtime_root: Path,
+    intake,
+    classification: ClassificationRecord,
+):
+    """Revalidate the capture and classification chain behind a proposal.
+
+    Returns the capture evidence record, or `None` if anything disagrees.
+    Step 6 re-runs this before any permanent write, so it lives at module
+    level rather than inside the service that first needed it.
+    """
+    if (
+        intake.capture_id != classification.capture_id
+        or intake.source_type != "cli-typed"
+        or intake.evidence_path != f"evidence/{intake.capture_id}"
+        or intake.trace_id != intake.capture_id
+        or not is_ulid(classification.classification_id)
+        or classification.candidate_type not in ROUTING
+        or classification.sensitivity not in {"normal", "sensitive"}
+        or type(classification.confidence) not in (int, float)
+        or not 0 <= classification.confidence <= 1
+        or classification.routing != ROUTING[classification.candidate_type]
+        or classification.prompt_version != "classify-v1"
+        or classification.raw_response_path
+        != (
+            "classification-evidence/"
+            f"{classification.classification_id}/raw-response.txt"
+        )
+    ):
+        return None
+    try:
+        evidence = evidence_store.validate_directory(
+            runtime_root / intake.evidence_path
+        )
+        response = classification_store.validate_directory(
+            runtime_root / Path(classification.raw_response_path).parent
+        )
+        parsed = parse_classification_response(
+            response.raw_path.read_text(encoding="utf-8")
+        )
+    except (
+        ClassificationEvidenceError,
+        EvidenceError,
+        OSError,
+        TypeError,
+        UnicodeError,
+        ValueError,
+    ):
+        return None
+    if (
+        evidence.capture_id != intake.capture_id
+        or evidence.content_hash != intake.content_hash
+        or evidence.captured_at != intake.captured_at
+        or response.classification_id != classification.classification_id
+        or response.capture_id != classification.capture_id
+        or response.model_id != classification.model_id
+        or response.prompt_version != classification.prompt_version
+        or response.received_at != classification.created_at
+        or parsed
+        != (
+            classification.candidate_type,
+            classification.sensitivity,
+            classification.confidence,
+        )
+    ):
+        return None
+    return evidence
+
+
 class ProposalService:
     def __init__(
         self,
@@ -1770,63 +1841,13 @@ class ProposalService:
         intake,
         classification: ClassificationRecord,
     ):
-        if (
-            intake.capture_id != classification.capture_id
-            or intake.source_type != "cli-typed"
-            or intake.evidence_path != f"evidence/{intake.capture_id}"
-            or intake.trace_id != intake.capture_id
-            or not is_ulid(classification.classification_id)
-            or classification.candidate_type not in ROUTING
-            or classification.sensitivity not in {"normal", "sensitive"}
-            or type(classification.confidence) not in (int, float)
-            or not 0 <= classification.confidence <= 1
-            or classification.routing
-            != ROUTING[classification.candidate_type]
-            or classification.prompt_version != "classify-v1"
-            or classification.raw_response_path
-            != (
-                "classification-evidence/"
-                f"{classification.classification_id}/raw-response.txt"
-            )
-        ):
-            return None
-        try:
-            evidence = self._evidence_store.validate_directory(
-                self._runtime_root / intake.evidence_path
-            )
-            response = self._classification_store.validate_directory(
-                self._runtime_root / Path(classification.raw_response_path).parent
-            )
-            parsed = parse_classification_response(
-                response.raw_path.read_text(encoding="utf-8")
-            )
-        except (
-            ClassificationEvidenceError,
-            EvidenceError,
-            OSError,
-            TypeError,
-            UnicodeError,
-            ValueError,
-        ):
-            return None
-        if (
-            evidence.capture_id != intake.capture_id
-            or evidence.content_hash != intake.content_hash
-            or evidence.captured_at != intake.captured_at
-            or response.classification_id != classification.classification_id
-            or response.capture_id != classification.capture_id
-            or response.model_id != classification.model_id
-            or response.prompt_version != classification.prompt_version
-            or response.received_at != classification.created_at
-            or parsed
-            != (
-                classification.candidate_type,
-                classification.sensitivity,
-                classification.confidence,
-            )
-        ):
-            return None
-        return evidence
+        return validated_prior_state(
+            self._evidence_store,
+            self._classification_store,
+            self._runtime_root,
+            intake,
+            classification,
+        )
 
     def _result(
         self,

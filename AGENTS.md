@@ -183,5 +183,6 @@ metis capture "<text>"     # immutable typed capture with exact replay protectio
 metis classify <capture_id> # classify one preserved capture through the configured model adapter
 metis propose "<capture-id>" # create or resume one proposal and proposed Obsidian draft
 metis approvals            # read the vault status field and record each human decision
+metis file <capture-id>    # file one approved note with provenance and resolved links
 metis status               # not yet implemented
 ```

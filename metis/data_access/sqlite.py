@@ -1115,6 +1115,89 @@ class SQLiteStateStore:
                 connection.rollback()
             raise StateStoreError(f"approval recording failed: {error}") from error
 
+    def find_approval_by_proposal_id(
+        self,
+        proposal_id: str,
+    ) -> Optional[ApprovalRecord]:
+        """Return the recorded decision for a proposal, if one exists."""
+        try:
+            row = self._connect().execute(
+                f"SELECT {', '.join(APPROVAL_COLUMNS)} FROM approval "
+                "WHERE proposal_id = ?",
+                (proposal_id,),
+            ).fetchone()
+        except sqlite3.Error as error:
+            raise StateStoreError(f"approval lookup failed: {error}") from error
+        return None if row is None else ApprovalRecord(*row)
+
+    def record_filing(
+        self,
+        capture_id: str,
+        proposal_id: str,
+        approval_id: str,
+        committed_at: str,
+    ) -> IntakeRecord:
+        """Commit an approved note and mark its intake filed atomically."""
+        connection = self._proposal_connection("filing")
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            current = self._required_intake(connection, capture_id)
+            proposal_row = connection.execute(
+                "SELECT proposal_id, state FROM proposal WHERE capture_id = ?",
+                (capture_id,),
+            ).fetchone()
+            approval_row = connection.execute(
+                "SELECT proposal_id, decision, committed_at, revoked_at "
+                "FROM approval WHERE approval_id = ?",
+                (approval_id,),
+            ).fetchone()
+            if (
+                current.state != "approved"
+                or current.failure_reason is not None
+                or proposal_row != (proposal_id, "approved")
+                or approval_row != (proposal_id, "approved", None, None)
+                or not _timestamp_not_before(committed_at, current.state_updated_at)
+            ):
+                connection.rollback()
+                raise StateTransitionRefused(
+                    "filing requires an approved intake with an uncommitted decision",
+                    current,
+                )
+            cursor = connection.execute(
+                "UPDATE approval SET committed_at = ? WHERE approval_id = ? "
+                "AND proposal_id = ? AND committed_at IS NULL",
+                (committed_at, approval_id, proposal_id),
+            )
+            if cursor.rowcount != 1:
+                connection.rollback()
+                raise StateTransitionRefused(
+                    "filing lost its approval comparison",
+                    current,
+                )
+            cursor = connection.execute(
+                "UPDATE intake SET state = 'filed', state_updated_at = ?, "
+                "failure_reason = NULL WHERE capture_id = ? AND state = 'approved' "
+                "AND failure_reason IS NULL AND state_updated_at = ?",
+                (committed_at, capture_id, current.state_updated_at),
+            )
+            if cursor.rowcount != 1:
+                connection.rollback()
+                raise StateTransitionRefused(
+                    "filing lost its state comparison",
+                    current,
+                )
+            updated = self._required_intake(connection, capture_id)
+            connection.commit()
+            return updated
+        except (StateStoreError, StateTransitionRefused):
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        except sqlite3.Error as error:
+            if connection.in_transaction:
+                connection.rollback()
+            raise StateStoreError(f"filing failed: {error}") from error
+
     def _proposal_connection(self, operation: str) -> sqlite3.Connection:
         try:
             return self._connect()

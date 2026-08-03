@@ -232,3 +232,18 @@ class StateStore(Protocol):
 
     def record_approval(self, record: ApprovalRecord) -> IntakeRecord:
         """Atomically record one human decision and transition its intake."""
+
+    def find_approval_by_proposal_id(
+        self,
+        proposal_id: str,
+    ) -> Optional[ApprovalRecord]:
+        """Return the recorded decision for a proposal, if one exists."""
+
+    def record_filing(
+        self,
+        capture_id: str,
+        proposal_id: str,
+        approval_id: str,
+        committed_at: str,
+    ) -> IntakeRecord:
+        """Atomically commit an approved note and mark its intake filed."""

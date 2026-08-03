@@ -157,7 +157,7 @@ a fact, and Step 3 grants it no write authority over durable knowledge.
 | `note_type` | TEXT | the typed note this would become |
 | `title` | TEXT | proposed title |
 | `body_path` | TEXT | proposed note body, on disk, not yet in the vault |
-| `proposed_links` | TEXT (JSON) | exactly `[]` in Step 4; final link enforcement is Step 6 |
+| `proposed_links` | TEXT (JSON) | always `[]` — Metis never proposes a link (ADR-020). The human types links into the draft, and Step 6 resolves them at filing time; they are not persisted here |
 | `evidence_refs` | TEXT (JSON) | everything this proposal rests on |
 | `confidence` | REAL | |
 | `sensitivity` | TEXT | copied from classification: `normal` · `sensitive` |
@@ -326,8 +326,13 @@ Rules:
 - `capture_id` and `evidence` are mandatory — a note without provenance is invalid (REQ-VLT-004).
 - `verification` is separate from `status`. Approving that a note should exist is not the same as verifying
   its content is true (REQ-DATA-005).
-- `links` must resolve to existing notes. An unresolvable link blocks the commit rather than creating an
-  orphan (REQ-INTK-004).
+- `links` must resolve to existing notes — matched against the `id` field of a note in `vault/goals/` or
+  `vault/projects/`, not against its filename. An unresolvable link, or none at all, blocks the commit rather
+  than creating an orphan (REQ-INTK-004). It does not invalidate the approval: correct the link and re-run
+  `metis file`.
+- `approved` holds the timestamp at which the human's decision was *detected*, not the moment of filing, so
+  the filed bytes are a deterministic function of the approval. The filing time lives in
+  `approval.committed_at`.
 
 ### 4.4 Vault layout
 

@@ -45,6 +45,22 @@ def force_intake_state(
     store._connection.commit()
 
 
+def delete_approvals(store) -> None:
+    store._connection.execute("DELETE FROM approval")
+    store._connection.commit()
+
+
+def force_approval_committed_at(store, committed_at: str | None) -> None:
+    cursor = store._connection.execute(
+        "UPDATE approval SET committed_at = ?",
+        (committed_at,),
+    )
+    if cursor.rowcount != 1:
+        store._connection.rollback()
+        raise AssertionError("test approval mutation missed its row")
+    store._connection.commit()
+
+
 def force_proposal_draft_path(
     store,
     proposal_id: str,
