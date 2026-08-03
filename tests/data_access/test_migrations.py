@@ -428,7 +428,7 @@ class MigrationTests(unittest.TestCase):
     def test_migrations_create_six_operational_tables(self) -> None:
         store = self._initialize()
 
-        self.assertEqual(store.schema_version, 5)
+        self.assertEqual(store.schema_version, 6)
         with sqlite3.connect(self.database_path) as connection:
             rows = connection.execute(
                 "SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name"
@@ -796,7 +796,7 @@ class MigrationTests(unittest.TestCase):
     def test_reapplying_migrations_is_idempotent(self) -> None:
         store = self._initialize()
         store.initialize()
-        self.assertEqual(store.schema_version, 5)
+        self.assertEqual(store.schema_version, 6)
         self.assertEqual(self._columns("intake"), EXPECTED_COLUMNS["intake"])
 
     def test_migration_preserves_existing_intake_and_classification_rows(self) -> None:
@@ -824,7 +824,7 @@ class MigrationTests(unittest.TestCase):
             )
         store = self._initialize()
 
-        self.assertEqual(store.schema_version, 5)
+        self.assertEqual(store.schema_version, 6)
         with sqlite3.connect(self.database_path) as connection:
             intake_count = connection.execute("SELECT COUNT(*) FROM intake").fetchone()
             classification_count = connection.execute(
@@ -913,15 +913,173 @@ class MigrationTests(unittest.TestCase):
     def test_newer_database_schema_fails_closed(self) -> None:
         self.database_path.parent.mkdir(parents=True)
         with sqlite3.connect(self.database_path) as connection:
-            connection.execute("PRAGMA user_version = 6")
+            connection.execute("PRAGMA user_version = 7")
         store = SQLiteStateStore(self.database_path)
         self.addCleanup(store.close)
 
         with self.assertRaisesRegex(
             MigrationError,
-            "database schema version 6 is newer than supported version 5",
+            "database schema version 7 is newer than supported version 6",
         ):
             store.initialize()
+
+    def _initialize_version_five(self) -> None:
+        """A database as it stood before ADR-021 widened the note types."""
+        self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        migrations = (
+            Path(__file__).resolve().parents[2] / "metis" / "data_access" / "migrations"
+        )
+        scripts = [
+            path.read_text(encoding="utf-8")
+            for path in sorted(migrations.glob("00[1-5]_*.sql"))
+        ]
+        with sqlite3.connect(self.database_path) as connection:
+            connection.executescript(
+                "BEGIN IMMEDIATE;\n"
+                + "\n".join(scripts)
+                + "\nPRAGMA user_version = 5;\nCOMMIT;"
+            )
+
+    def _insert_valid_proposal(self, connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            INSERT INTO proposal (
+                proposal_id, capture_id, classification_id, note_type, title,
+                body_path, proposed_links, evidence_refs, confidence,
+                sensitivity, risk_level, reason, uncertainties_json, model_id,
+                prompt_version, raw_response_path, content_hash, state, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "proposal-1",
+                "01J8X2K4P7M3QRSTVWXYZ0ABCD",
+                "classification-1",
+                "idea",
+                "A title",
+                "proposal-content/proposal-1/note.md",
+                "[]",
+                "[]",
+                0.8,
+                "normal",
+                "low",
+                "because",
+                "[]",
+                "model-1",
+                "prompt-1",
+                "proposal-evidence/proposal-1/raw-response.txt",
+                "a" * 64,
+                "pending",
+                "2026-07-31T12:00:02Z",
+            ),
+        )
+
+    def test_planning_types_migration_preserves_the_existing_row_chain(self) -> None:
+        """The rebuild in 006 widens a CHECK without losing rows or breaking links."""
+        self._initialize_version_five()
+        with sqlite3.connect(self.database_path) as connection:
+            connection.execute("PRAGMA foreign_keys = ON")
+            self._insert_valid_intake(connection)
+            self._insert_valid_classification(connection)
+            self._insert_valid_proposal(connection)
+
+        store = self._initialize()
+
+        self.assertEqual(store.schema_version, 6)
+        with sqlite3.connect(self.database_path) as connection:
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM classification").fetchone(),
+                (1,),
+            )
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM proposal").fetchone(), (1,)
+            )
+            self.assertEqual(
+                connection.execute("PRAGMA foreign_key_check").fetchall(), []
+            )
+
+    def _insert_intake_named(
+        self, connection: sqlite3.Connection, capture_id: str
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO intake (
+                capture_id, content_hash, captured_at, source_type,
+                evidence_path, state, state_updated_at, trace_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                capture_id,
+                f"sha256:{capture_id}",
+                "2026-07-31T12:00:00Z",
+                "cli-typed",
+                f"evidence/{capture_id}",
+                "captured",
+                "2026-07-31T12:00:00Z",
+                capture_id,
+            ),
+        )
+
+    def test_planning_types_are_storable_after_migration(self) -> None:
+        self._initialize()
+        with sqlite3.connect(self.database_path) as connection:
+            connection.execute("PRAGMA foreign_keys = ON")
+            for candidate_type in ("goal", "project"):
+                with self.subTest(candidate_type=candidate_type):
+                    capture_id = f"capture-{candidate_type}"
+                    self._insert_intake_named(connection, capture_id)
+                    connection.execute(
+                        """
+                        INSERT INTO classification (
+                            classification_id, capture_id, candidate_type,
+                            sensitivity, confidence, routing, model_id,
+                            prompt_version, raw_response_path, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            f"classification-{candidate_type}",
+                            capture_id,
+                            candidate_type,
+                            "normal",
+                            0.8,
+                            f"proposal:{candidate_type}",
+                            "model-1",
+                            "prompt-1",
+                            "evidence/model-response.json",
+                            "2026-07-31T12:00:01Z",
+                        ),
+                    )
+            self.assertEqual(
+                connection.execute("PRAGMA foreign_key_check").fetchall(), []
+            )
+
+    def test_an_unknown_note_type_is_still_rejected_after_migration(self) -> None:
+        """Widening the CHECK must not become an open door."""
+        self._initialize()
+        with sqlite3.connect(self.database_path) as connection:
+            connection.execute("PRAGMA foreign_keys = ON")
+            self._insert_intake_named(connection, "capture-bad")
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    """
+                    INSERT INTO classification (
+                        classification_id, capture_id, candidate_type, sensitivity,
+                        confidence, routing, model_id, prompt_version,
+                        raw_response_path, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "classification-bad",
+                        "capture-bad",
+                        "outcome",
+                        "normal",
+                        0.8,
+                        "proposal:outcome",
+                        "model-1",
+                        "prompt-1",
+                        "evidence/model-response.json",
+                        "2026-07-31T12:00:01Z",
+                    ),
+                )
 
 
 if __name__ == "__main__":
