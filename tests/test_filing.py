@@ -281,7 +281,7 @@ class FilingTests(FilingFixture):
 
         self.assertEqual(result.status, FilingStatus.FILED)
 
-        self.setUp()
+    def test_a_matching_filename_without_an_id_field_does_not_resolve(self) -> None:
         self._approved()
         goal = self.root / "vault" / "goals" / f"{GOAL_ID}.md"
         goal.write_bytes(GOAL_NOTE.replace(b"id: goal.health-baseline\n", b"", 1))
@@ -290,6 +290,7 @@ class FilingTests(FilingFixture):
 
         self.assertEqual(result.status, FilingStatus.FAILED)
         self.assertEqual(result.reason, "filing.link_unresolvable")
+        self.assertFalse(self._filed_exists())
 
 
 class UnapprovedWriteTests(FilingFixture):
