@@ -17,6 +17,7 @@ from .data_access import (
     StateStoreError,
 )
 from .evidence import (
+    PIN_TYPES,
     EvidenceCollision,
     EvidenceConsistencyError,
     EvidenceRecord,
@@ -56,8 +57,14 @@ class CaptureService:
         self._clock = clock
         self._audit = AuditTrail(state_store, clock=clock)
 
-    def capture(self, text: str) -> CaptureResult:
-        result = self._capture(text)
+    def capture(
+        self,
+        text: str,
+        *,
+        type_pin: Optional[str] = None,
+        parent_goal_id: Optional[str] = None,
+    ) -> CaptureResult:
+        result = self._capture(text, type_pin, parent_goal_id)
         if result.status is not CaptureStatus.CAPTURED:
             # Nothing was registered, so no transition carried this outcome.
             self._audit.record(
@@ -68,7 +75,30 @@ class CaptureService:
             )
         return result
 
-    def _capture(self, text: str) -> CaptureResult:
+    def _capture(
+        self,
+        text: str,
+        type_pin: Optional[str],
+        parent_goal_id: Optional[str],
+    ) -> CaptureResult:
+        # Refuse an incoherent pin before anything is written (ADR-021).
+        if type_pin is not None and type_pin not in PIN_TYPES:
+            return CaptureResult(
+                CaptureStatus.REFUSED,
+                None,
+                None,
+                "pin_invalid",
+                f"type pin must be one of {sorted(PIN_TYPES)}",
+            )
+        if (type_pin == "project") != (parent_goal_id is not None):
+            return CaptureResult(
+                CaptureStatus.REFUSED,
+                None,
+                None,
+                "pin_incomplete",
+                "a project pin requires a parent goal, and only a project may carry one",
+            )
+
         try:
             raw_bytes = text.encode("utf-8")
         except UnicodeEncodeError as error:
@@ -101,6 +131,19 @@ class CaptureService:
                 error.evidence_path,
                 "evidence_inconsistent",
                 str(error),
+            )
+
+        # Identical text under a different pin is a different intent, not a replay.
+        # Both resolution paths below must refuse it, or one stays fail-open.
+        if evidence is not None and not self._pin_matches(
+            evidence, type_pin, parent_goal_id
+        ):
+            return CaptureResult(
+                CaptureStatus.REFUSED,
+                evidence.capture_id,
+                evidence.evidence_path,
+                "pin_conflict",
+                "this text was already captured under a different planning pin",
             )
 
         if existing is not None:
@@ -147,6 +190,8 @@ class CaptureService:
                 raw_bytes,
                 content_hash,
                 captured_at,
+                type_pin,
+                parent_goal_id,
             )
             evidence = self._evidence_store.validate_directory(evidence.directory)
         except EvidenceCollision as error:
@@ -242,6 +287,17 @@ class CaptureService:
             evidence.evidence_path,
             "late_duplicate_registration",
             "state registration reported a duplicate after evidence creation",
+        )
+
+    @staticmethod
+    def _pin_matches(
+        evidence: EvidenceRecord,
+        type_pin: Optional[str],
+        parent_goal_id: Optional[str],
+    ) -> bool:
+        return (
+            evidence.type_pin == type_pin
+            and evidence.parent_goal_id == parent_goal_id
         )
 
     def _row_matches_evidence(

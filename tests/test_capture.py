@@ -160,6 +160,8 @@ class WriteFailingEvidenceStore(EvidenceStore):
         raw_bytes: bytes,
         content_hash: str,
         captured_at: str,
+        type_pin: Optional[str] = None,
+        parent_goal_id: Optional[str] = None,
     ) -> EvidenceRecord:
         raise EvidenceWriteError(
             "simulated evidence write failure",

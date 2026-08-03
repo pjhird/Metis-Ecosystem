@@ -18,7 +18,7 @@ from .classification import (
 )
 from .classification_evidence import ClassificationEvidenceStore
 from .data_access import SQLiteStateStore
-from .draft_notes import DraftNoteStore
+from .draft_notes import LINK_TARGET, DraftNoteStore
 from .evidence import EvidenceStore
 from .filing import FilingResult, FilingService, FilingStatus
 from .proposal import ProposalResult, ProposalService, ProposalStatus
@@ -36,6 +36,9 @@ def main(
     subparsers = parser.add_subparsers(dest="command", required=True)
     capture_parser = subparsers.add_parser("capture")
     capture_parser.add_argument("text")
+    # `--as` is a Python keyword, so the destination is named explicitly.
+    capture_parser.add_argument("--as", dest="type_pin", choices=("goal", "project"))
+    capture_parser.add_argument("--goal", dest="parent_goal_id")
     classify_parser = subparsers.add_parser("classify")
     classify_parser.add_argument("capture_id")
     propose_parser = subparsers.add_parser("propose")
@@ -45,6 +48,18 @@ def main(
     file_parser.add_argument("capture_id")
     arguments = parser.parse_args(argv)
 
+    if arguments.command == "capture":
+        # Usage errors exit before any service is built, so no evidence is written.
+        if arguments.type_pin == "project" and arguments.parent_goal_id is None:
+            parser.error("--as project requires --goal <goal-id>")
+        if arguments.parent_goal_id is not None and arguments.type_pin != "project":
+            parser.error("--goal is only valid with --as project")
+        if (
+            arguments.parent_goal_id is not None
+            and LINK_TARGET.fullmatch(arguments.parent_goal_id) is None
+        ):
+            parser.error("--goal must be a note id matching [A-Za-z0-9._-]+")
+
     root = Path.cwd() if runtime_root is None else Path(runtime_root)
     initialized = False
     try:
@@ -53,7 +68,9 @@ def main(
             initialized = True
             if arguments.command == "capture":
                 result = CaptureService(state_store, EvidenceStore(root)).capture(
-                    arguments.text
+                    arguments.text,
+                    type_pin=arguments.type_pin,
+                    parent_goal_id=arguments.parent_goal_id,
                 )
             elif arguments.command == "classify":
                 if model_adapter_factory is None:
