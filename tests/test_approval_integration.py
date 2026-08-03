@@ -9,7 +9,11 @@ from pathlib import Path
 
 from metis.cli import main
 from metis.data_access import SQLiteStateStore
-from tests.data_access.inspection import approval_rows, table_row_count
+from tests.data_access.inspection import (
+    approval_rows,
+    audit_event_rows,
+    table_row_count,
+)
 from tests.test_proposal_integration import PipelineAdapter
 
 
@@ -76,7 +80,13 @@ class ApprovalIntegrationTests(unittest.TestCase):
                 self.assertIsNone(rows[0].committed_at)
                 self.assertIsNone(rows[0].revoked_at)
                 self.assertEqual(table_row_count(store, "approval"), 1)
-                self.assertEqual(table_row_count(store, "audit_event"), 0)
+                # The decision is audited; polling a draft that has not moved
+                # is not a material action and emits nothing.
+                trail = audit_event_rows(store)
+                self.assertEqual(len(trail), 7)
+                self.assertEqual(trail[-1].action, "approval.detected")
+                self.assertEqual(trail[-1].outcome, "success")
+                self.assertEqual(trail[-1].actor, "human:owner")
 
             self.assertEqual(draft.read_bytes(), edited)
             self.assertFalse((root / "vault" / "notes" / "filed").exists())

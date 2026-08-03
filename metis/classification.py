@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable, Optional
 from uuid import UUID
 
+from .audit import OUTCOMES, AuditTrail
 from .classification_evidence import (
     ClassificationEvidenceError,
     ClassificationEvidenceConsistencyError,
@@ -112,6 +113,7 @@ class ClassificationService:
         self._runtime_root = Path(runtime_root)
         self._id_factory = id_factory
         self._clock = clock
+        self._audit = AuditTrail(state_store, clock=clock)
 
     def classify(self, capture_id: str) -> ClassificationResult:
         try:
@@ -195,7 +197,16 @@ class ClassificationService:
             )
         received_at = self._timestamp()
         try:
-            self._state_store.begin_classification(capture_id, received_at)
+            self._state_store.begin_classification(
+                capture_id,
+                received_at,
+                audit=self._audit.event(
+                    "classification.started",
+                    "success",
+                    capture_id=capture_id,
+                    detail={"state": "classifying"},
+                ),
+            )
         except StateTransitionRefused as error:
             if error.record.state == "classifying":
                 return self._result(
@@ -332,7 +343,19 @@ class ClassificationService:
             created_at=received_at,
         )
         try:
-            self._state_store.complete_classification(record)
+            self._state_store.complete_classification(
+                record,
+                audit=self._audit.event(
+                    "classification.completed",
+                    "success",
+                    capture_id=capture_id,
+                    detail={
+                        "state": "classified",
+                        "classification_id": classification_id,
+                        "candidate_type": candidate_type,
+                    },
+                ),
+            )
         except (StateStoreError, StateTransitionRefused):
             return self._failure_after_start(
                 capture_id,
@@ -349,6 +372,7 @@ class ClassificationService:
             confidence=confidence,
             routing=routing,
             raw_response_path=record.raw_response_path,
+            audited=True,
         )
 
     def _replay(
@@ -482,6 +506,12 @@ class ClassificationService:
                 capture_id,
                 f"classification.{reason}",
                 self._timestamp(),
+                audit=self._audit.event(
+                    "classification.failed",
+                    "failure",
+                    capture_id=capture_id,
+                    detail={"state": "failed", "reason": f"classification.{reason}"},
+                ),
             )
         except (StateStoreError, StateTransitionRefused):
             return self._result(
@@ -499,6 +529,7 @@ class ClassificationService:
             raw_response_path=raw_response_path,
             reason=reason,
             message="classification failed",
+            audited=True,
         )
 
     def _consistency_failure(self, capture_id: str) -> ClassificationResult:
@@ -559,7 +590,16 @@ class ClassificationService:
         raw_response_path: Optional[str] = None,
         reason: Optional[str] = None,
         message: Optional[str] = None,
+        audited: bool = False,
     ) -> ClassificationResult:
+        if not audited:
+            # This outcome rode no transition, so it carries its own event.
+            self._audit.record(
+                "command.classify",
+                OUTCOMES[status.value],
+                capture_id=capture_id,
+                detail={"status": status.value, "reason": reason},
+            )
         return ClassificationResult(
             status=status,
             capture_id=capture_id,

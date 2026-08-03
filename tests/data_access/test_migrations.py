@@ -135,19 +135,26 @@ class FakeStateStore:
     ) -> ClassificationRecord | None:
         return None
 
-    def register_intake(self, record: IntakeRecord) -> IntakeRegistrationResult:
+    def append_audit_event(self, record) -> None:
+        """Emission is asserted against the real store, not this fake."""
+
+    def register_intake(
+        self, record: IntakeRecord, *, audit=None
+    ) -> IntakeRegistrationResult:
         return IntakeRegistrationResult(IntakeRegistrationStatus.REGISTERED, record)
 
-    def begin_classification(self, capture_id: str, started_at: str) -> IntakeRecord:
+    def begin_classification(
+        self, capture_id: str, started_at: str, *, audit=None
+    ) -> IntakeRecord:
         raise NotImplementedError
 
     def complete_classification(
-        self, record: ClassificationRecord
+        self, record: ClassificationRecord, *, audit=None
     ) -> ClassificationRecord:
         raise NotImplementedError
 
     def record_classification_failure(
-        self, capture_id: str, reason: str, failed_at: str
+        self, capture_id: str, reason: str, failed_at: str, *, audit=None
     ) -> IntakeRecord:
         raise NotImplementedError
 
@@ -162,7 +169,7 @@ class FakeStateStore:
         return None
 
     def begin_proposal(
-        self, reservation: ProposalReservationRecord
+        self, reservation: ProposalReservationRecord, *, audit=None
     ) -> ProposalReservationRecord:
         raise NotImplementedError
 
@@ -171,6 +178,8 @@ class FakeStateStore:
         expected: ProposalReservationRecord,
         replacement: ProposalReservationRecord,
         reclaimed_at: str,
+        *,
+        audit=None,
     ) -> ProposalReservationRecord:
         raise NotImplementedError
 
@@ -180,11 +189,13 @@ class FakeStateStore:
         lease_token: str,
         reason: str,
         failed_at: str,
+        *,
+        audit=None,
     ) -> IntakeRecord:
         raise NotImplementedError
 
     def complete_proposal(
-        self, record: ProposalRecord, lease_token: str
+        self, record: ProposalRecord, lease_token: str, *, audit=None
     ) -> ProposalRecord:
         raise NotImplementedError
 
@@ -194,11 +205,13 @@ class FakeStateStore:
         proposal_id: str,
         reason: str,
         failed_at: str,
+        *,
+        audit=None,
     ) -> IntakeRecord:
         raise NotImplementedError
 
     def resume_proposal_draft(
-        self, capture_id: str, proposal_id: str, resumed_at: str
+        self, capture_id: str, proposal_id: str, resumed_at: str, *, audit=None
     ) -> IntakeRecord:
         raise NotImplementedError
 
@@ -208,13 +221,15 @@ class FakeStateStore:
         proposal_id: str,
         draft_note_path: str,
         registered_at: str,
+        *,
+        audit=None,
     ) -> ProposalRecord:
         raise NotImplementedError
 
     def find_intakes_awaiting_approval(self) -> tuple[IntakeRecord, ...]:
         return ()
 
-    def record_approval(self, record: ApprovalRecord) -> IntakeRecord:
+    def record_approval(self, record: ApprovalRecord, *, audit=None) -> IntakeRecord:
         raise NotImplementedError
 
     def find_approval_by_proposal_id(
@@ -228,6 +243,8 @@ class FakeStateStore:
         proposal_id: str,
         approval_id: str,
         committed_at: str,
+        *,
+        audit=None,
     ) -> IntakeRecord:
         raise NotImplementedError
 
@@ -411,7 +428,7 @@ class MigrationTests(unittest.TestCase):
     def test_migrations_create_six_operational_tables(self) -> None:
         store = self._initialize()
 
-        self.assertEqual(store.schema_version, 4)
+        self.assertEqual(store.schema_version, 5)
         with sqlite3.connect(self.database_path) as connection:
             rows = connection.execute(
                 "SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name"
@@ -739,10 +756,47 @@ class MigrationTests(unittest.TestCase):
             with self.assertRaises(sqlite3.IntegrityError):
                 connection.execute(statement, parameters)
 
+    def test_audit_events_are_append_only(self) -> None:
+        """Schema §2.6: never updated, never deleted — enforced, not promised."""
+        self._initialize()
+
+        with sqlite3.connect(self.database_path) as connection:
+            connection.execute(
+                """
+                INSERT INTO audit_event (
+                    event_id, trace_id, capture_id, actor, action,
+                    outcome, detail, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "01J8X2K4P7M3QRSTVWXYZ0ABCD",
+                    "trace-1",
+                    None,
+                    "orchestrator",
+                    "capture.written",
+                    "success",
+                    "{}",
+                    "2026-07-31T12:00:02Z",
+                ),
+            )
+            for statement in (
+                "UPDATE audit_event SET outcome = 'failure'",
+                "UPDATE audit_event SET detail = '{\"edited\":true}'",
+                "DELETE FROM audit_event",
+            ):
+                with self.subTest(statement=statement):
+                    with self.assertRaises(sqlite3.IntegrityError):
+                        connection.execute(statement)
+            remaining = connection.execute(
+                "SELECT outcome, detail FROM audit_event"
+            ).fetchall()
+
+        self.assertEqual(remaining, [("success", "{}")])
+
     def test_reapplying_migrations_is_idempotent(self) -> None:
         store = self._initialize()
         store.initialize()
-        self.assertEqual(store.schema_version, 4)
+        self.assertEqual(store.schema_version, 5)
         self.assertEqual(self._columns("intake"), EXPECTED_COLUMNS["intake"])
 
     def test_migration_preserves_existing_intake_and_classification_rows(self) -> None:
@@ -770,7 +824,7 @@ class MigrationTests(unittest.TestCase):
             )
         store = self._initialize()
 
-        self.assertEqual(store.schema_version, 4)
+        self.assertEqual(store.schema_version, 5)
         with sqlite3.connect(self.database_path) as connection:
             intake_count = connection.execute("SELECT COUNT(*) FROM intake").fetchone()
             classification_count = connection.execute(
@@ -859,13 +913,13 @@ class MigrationTests(unittest.TestCase):
     def test_newer_database_schema_fails_closed(self) -> None:
         self.database_path.parent.mkdir(parents=True)
         with sqlite3.connect(self.database_path) as connection:
-            connection.execute("PRAGMA user_version = 5")
+            connection.execute("PRAGMA user_version = 6")
         store = SQLiteStateStore(self.database_path)
         self.addCleanup(store.close)
 
         with self.assertRaisesRegex(
             MigrationError,
-            "database schema version 5 is newer than supported version 4",
+            "database schema version 6 is newer than supported version 5",
         ):
             store.initialize()
 

@@ -41,7 +41,7 @@ from metis.proposal_evidence import (
     ProposalEvidenceCollision,
     ProposalEvidenceStore,
 )
-from tests.data_access.inspection import force_intake_state
+from tests.data_access.inspection import audit_event_rows, force_intake_state
 
 
 CAPTURE_ID = "8f14e45f-ea3c-4f7a-9f2d-6c8b5a1d3e70"
@@ -119,11 +119,11 @@ class BeginProposalRaceStore(StateStoreProxy):
         self.establish_winner = establish_winner
         self.raced = False
 
-    def begin_proposal(self, reservation):
+    def begin_proposal(self, reservation, *, audit=None):
         if not self.raced:
             self.raced = True
             self.establish_winner()
-        return self.store.begin_proposal(reservation)
+        return self.store.begin_proposal(reservation, audit=audit)
 
 
 class FailingDraftStore:
@@ -580,6 +580,11 @@ class ProposalServiceTests(unittest.TestCase):
 
         self._assert_recorded_attempt_failure(result, "model_request_failed")
         self.assertIsNone(result.raw_response_path)
+        trail = audit_event_rows(self.state_store)
+        self.assertEqual(
+            (trail[-1].action, trail[-1].outcome),
+            ("proposal.failed", "failure"),
+        )
 
     def test_refused_response_is_preserved_before_failure_recording(self) -> None:
         self._classified()
@@ -669,6 +674,14 @@ class ProposalServiceTests(unittest.TestCase):
             self.state_store.find_intake_by_capture_id(CAPTURE_ID).failure_reason,
             "proposal.proposal_content_failed",
         )
+        # Refusing unsafe content is enforcement, so the transition it caused
+        # is recorded as refused — and the content itself never reaches it.
+        trail = audit_event_rows(self.state_store)
+        self.assertEqual(
+            (trail[-1].action, trail[-1].outcome),
+            ("proposal.failed", "refused"),
+        )
+        self.assertNotIn(secret, "".join(event.detail for event in trail))
 
     def test_preexisting_matching_proposal_evidence_fails_before_reservation(self) -> None:
         self._classified()
@@ -891,6 +904,12 @@ class ProposalServiceTests(unittest.TestCase):
         intake = self.state_store.find_intake_by_capture_id(CAPTURE_ID)
         self.assertEqual(intake.state, "failed")
         self.assertEqual(intake.failure_reason, "proposal.draft_write_failed")
+        trail = audit_event_rows(self.state_store)
+        self.assertEqual(
+            (trail[-1].action, trail[-1].outcome),
+            ("draft.failed", "failure"),
+        )
+        self.assertNotIn("unsafe", trail[-1].detail)
 
     def test_failure_recording_failure_reports_state_undetermined(self) -> None:
         self._classified()

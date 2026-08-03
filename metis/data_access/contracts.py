@@ -78,6 +78,20 @@ class ProposalRecord:
 
 
 @dataclass(frozen=True)
+class AuditEventRecord:
+    """One append-only record of something the orchestrator did."""
+
+    event_id: str
+    trace_id: str
+    capture_id: Optional[str]
+    actor: str
+    action: str
+    outcome: str
+    detail: str
+    created_at: str
+
+
+@dataclass(frozen=True)
 class ApprovalRecord:
     approval_id: str
     proposal_id: str
@@ -135,19 +149,28 @@ class StateStore(Protocol):
     ) -> Optional[ClassificationRecord]:
         """Return the classification for a capture ID, if one exists."""
 
-    def register_intake(self, record: IntakeRecord) -> IntakeRegistrationResult:
+    def register_intake(
+        self,
+        record: IntakeRecord,
+        *,
+        audit: Optional[AuditEventRecord] = None,
+    ) -> IntakeRegistrationResult:
         """Register a captured intake row or return the exact existing duplicate."""
 
     def begin_classification(
         self,
         capture_id: str,
         started_at: str,
+        *,
+        audit: Optional[AuditEventRecord] = None,
     ) -> IntakeRecord:
         """Move an eligible intake into the classifying state."""
 
     def complete_classification(
         self,
         record: ClassificationRecord,
+        *,
+        audit: Optional[AuditEventRecord] = None,
     ) -> ClassificationRecord:
         """Atomically persist a classification and mark its intake classified."""
 
@@ -156,6 +179,8 @@ class StateStore(Protocol):
         capture_id: str,
         reason: str,
         failed_at: str,
+        *,
+        audit: Optional[AuditEventRecord] = None,
     ) -> IntakeRecord:
         """Move a classifying intake into a known failed state."""
 
@@ -174,6 +199,8 @@ class StateStore(Protocol):
     def begin_proposal(
         self,
         reservation: ProposalReservationRecord,
+        *,
+        audit: Optional[AuditEventRecord] = None,
     ) -> ProposalReservationRecord:
         """Atomically reserve an eligible classified intake."""
 
@@ -182,6 +209,8 @@ class StateStore(Protocol):
         expected: ProposalReservationRecord,
         replacement: ProposalReservationRecord,
         reclaimed_at: str,
+        *,
+        audit: Optional[AuditEventRecord] = None,
     ) -> ProposalReservationRecord:
         """Replace an expired reservation token and resume proposing."""
 
@@ -191,6 +220,8 @@ class StateStore(Protocol):
         lease_token: str,
         reason: str,
         failed_at: str,
+        *,
+        audit: Optional[AuditEventRecord] = None,
     ) -> IntakeRecord:
         """Record a known reservation-stage proposal failure."""
 
@@ -198,6 +229,8 @@ class StateStore(Protocol):
         self,
         record: ProposalRecord,
         lease_token: str,
+        *,
+        audit: Optional[AuditEventRecord] = None,
     ) -> ProposalRecord:
         """Atomically persist a proposal and consume its reservation."""
 
@@ -207,6 +240,8 @@ class StateStore(Protocol):
         proposal_id: str,
         reason: str,
         failed_at: str,
+        *,
+        audit: Optional[AuditEventRecord] = None,
     ) -> IntakeRecord:
         """Record a known failure after proposal persistence."""
 
@@ -215,6 +250,8 @@ class StateStore(Protocol):
         capture_id: str,
         proposal_id: str,
         resumed_at: str,
+        *,
+        audit: Optional[AuditEventRecord] = None,
     ) -> IntakeRecord:
         """Restore a valid failed proposal to the proposed state."""
 
@@ -224,13 +261,20 @@ class StateStore(Protocol):
         proposal_id: str,
         draft_note_path: str,
         registered_at: str,
+        *,
+        audit: Optional[AuditEventRecord] = None,
     ) -> ProposalRecord:
         """Atomically register a draft and mark it awaiting approval."""
 
     def find_intakes_awaiting_approval(self) -> Tuple[IntakeRecord, ...]:
         """Return every intake whose draft is waiting for a human decision."""
 
-    def record_approval(self, record: ApprovalRecord) -> IntakeRecord:
+    def record_approval(
+        self,
+        record: ApprovalRecord,
+        *,
+        audit: Optional[AuditEventRecord] = None,
+    ) -> IntakeRecord:
         """Atomically record one human decision and transition its intake."""
 
     def find_approval_by_proposal_id(
@@ -245,5 +289,10 @@ class StateStore(Protocol):
         proposal_id: str,
         approval_id: str,
         committed_at: str,
+        *,
+        audit: Optional[AuditEventRecord] = None,
     ) -> IntakeRecord:
         """Atomically commit an approved note and mark its intake filed."""
+
+    def append_audit_event(self, record: AuditEventRecord) -> None:
+        """Append one audit event that rides no transition of its own."""

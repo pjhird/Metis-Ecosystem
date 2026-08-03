@@ -2,6 +2,7 @@
 
 from .contracts import (
     ApprovalRecord,
+    AuditEventRecord,
     ClassificationRecord,
     IntakeRecord,
     IntakeRegistrationResult,
@@ -16,6 +17,7 @@ from .sqlite import MigrationError, SQLiteStateStore
 
 __all__ = [
     "ApprovalRecord",
+    "AuditEventRecord",
     "ClassificationRecord",
     "IntakeRecord",
     "IntakeRegistrationResult",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -9,8 +10,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Tuple
 
+from ..identifiers import is_ulid
 from .contracts import (
     ApprovalRecord,
+    AuditEventRecord,
     ClassificationRecord,
     IntakeRecord,
     IntakeRegistrationResult,
@@ -80,6 +83,17 @@ APPROVAL_COLUMNS = (
     "revoked_at",
 )
 APPROVAL_DECISIONS = frozenset({"approved", "rejected"})
+AUDIT_COLUMNS = (
+    "event_id",
+    "trace_id",
+    "capture_id",
+    "actor",
+    "action",
+    "outcome",
+    "detail",
+    "created_at",
+)
+AUDIT_OUTCOMES = frozenset({"success", "failure", "refused"})
 PROPOSAL_RESERVATION_COLUMNS = (
     "proposal_id",
     "capture_id",
@@ -135,6 +149,41 @@ def _timestamp_not_before(value: str, minimum: str) -> bool:
         return _parse_utc_timestamp(value) >= _parse_utc_timestamp(minimum)
     except (TypeError, ValueError):
         return False
+
+
+def _validated_audit(record: AuditEventRecord) -> AuditEventRecord:
+    """Refuse an event that could not be read back as evidence (REQ-TEST-003)."""
+    if not is_ulid(record.event_id):
+        raise StateStoreError("audit event ID is not a ULID")
+    if not isinstance(record.trace_id, str) or not record.trace_id:
+        raise StateStoreError("audit event has no trace")
+    if record.capture_id is not None and (
+        not isinstance(record.capture_id, str) or not record.capture_id
+    ):
+        raise StateStoreError("audit event capture ID is not usable")
+    if record.actor != "orchestrator" and not (
+        isinstance(record.actor, str)
+        and record.actor.startswith(("skill:", "human:"))
+        and len(record.actor.split(":", 1)[1]) > 0
+    ):
+        raise StateStoreError(f"audit event actor is not recognised: {record.actor}")
+    if not isinstance(record.action, str) or not record.action:
+        raise StateStoreError("audit event has no action")
+    if record.outcome not in AUDIT_OUTCOMES:
+        raise StateStoreError(
+            f"audit event outcome is not recognised: {record.outcome}"
+        )
+    try:
+        detail = json.loads(record.detail)
+    except (TypeError, ValueError) as error:
+        raise StateStoreError(f"audit event detail is not JSON: {error}") from error
+    if type(detail) is not dict:
+        raise StateStoreError("audit event detail is not a JSON object")
+    try:
+        _parse_utc_timestamp(record.created_at)
+    except (TypeError, ValueError) as error:
+        raise StateStoreError(f"audit event is not timestamped: {error}") from error
+    return record
 
 
 def _intake_record(row: tuple) -> IntakeRecord:
@@ -280,7 +329,12 @@ class SQLiteStateStore:
             raise StateStoreError(f"proposal reservation lookup failed: {error}") from error
         return None if row is None else _proposal_reservation_record(row)
 
-    def register_intake(self, record: IntakeRecord) -> IntakeRegistrationResult:
+    def register_intake(
+        self,
+        record: IntakeRecord,
+        *,
+        audit: Optional[AuditEventRecord] = None,
+    ) -> IntakeRegistrationResult:
         """Register a captured intake row or return the exact existing duplicate."""
         connection: Optional[sqlite3.Connection] = None
         try:
@@ -292,11 +346,16 @@ class SQLiteStateStore:
                 ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 tuple(getattr(record, column) for column in INTAKE_COLUMNS),
             )
+            self._insert_audit(connection, audit)
             connection.commit()
             return IntakeRegistrationResult(
                 IntakeRegistrationStatus.REGISTERED,
                 record,
             )
+        except StateStoreError:
+            if connection is not None:
+                connection.rollback()
+            raise
         except sqlite3.IntegrityError as error:
             if connection is not None:
                 connection.rollback()
@@ -316,6 +375,8 @@ class SQLiteStateStore:
         self,
         capture_id: str,
         started_at: str,
+        *,
+        audit: Optional[AuditEventRecord] = None,
     ) -> IntakeRecord:
         """Move a captured or classification-failed intake to classifying."""
         try:
@@ -376,6 +437,7 @@ class SQLiteStateStore:
                 raise StateStoreError(
                     f"classification start failed: intake disappeared: {capture_id}"
                 )
+            self._insert_audit(connection, audit)
             connection.commit()
             return _intake_record(updated_row)
         except (StateStoreError, StateTransitionRefused):
@@ -390,6 +452,8 @@ class SQLiteStateStore:
     def complete_classification(
         self,
         record: ClassificationRecord,
+        *,
+        audit: Optional[AuditEventRecord] = None,
     ) -> ClassificationRecord:
         """Persist a classification and its classified state in one transaction."""
         try:
@@ -426,6 +490,7 @@ class SQLiteStateStore:
                     "classification completion requires state classifying",
                     _intake_record(current_row),
                 )
+            self._insert_audit(connection, audit)
             connection.commit()
             return record
         except (StateStoreError, StateTransitionRefused):
@@ -444,6 +509,8 @@ class SQLiteStateStore:
         capture_id: str,
         reason: str,
         failed_at: str,
+        *,
+        audit: Optional[AuditEventRecord] = None,
     ) -> IntakeRecord:
         """Move a classifying intake to failed with a known reason."""
         try:
@@ -477,6 +544,7 @@ class SQLiteStateStore:
                     "classification failure recording failed: intake disappeared: "
                     f"{capture_id}"
                 )
+            self._insert_audit(connection, audit)
             connection.commit()
             return _intake_record(updated_row)
         except (StateStoreError, StateTransitionRefused):
@@ -493,6 +561,8 @@ class SQLiteStateStore:
     def begin_proposal(
         self,
         reservation: ProposalReservationRecord,
+        *,
+        audit: Optional[AuditEventRecord] = None,
     ) -> ProposalReservationRecord:
         """Reserve a classified intake and enter proposing atomically."""
         if not _has_full_proposal_lease(reservation):
@@ -540,6 +610,7 @@ class SQLiteStateStore:
                     "proposal start lost its state comparison",
                     current,
                 )
+            self._insert_audit(connection, audit)
             connection.commit()
             return reservation
         except (StateStoreError, StateTransitionRefused):
@@ -566,6 +637,8 @@ class SQLiteStateStore:
         expected: ProposalReservationRecord,
         replacement: ProposalReservationRecord,
         reclaimed_at: str,
+        *,
+        audit: Optional[AuditEventRecord] = None,
     ) -> ProposalReservationRecord:
         """Replace an expired reservation token and resume proposing."""
         if (
@@ -661,6 +734,7 @@ class SQLiteStateStore:
                     "proposal reclaim lost its state comparison",
                     current,
                 )
+            self._insert_audit(connection, audit)
             connection.commit()
             return replacement
         except (StateStoreError, StateTransitionRefused):
@@ -678,6 +752,8 @@ class SQLiteStateStore:
         lease_token: str,
         reason: str,
         failed_at: str,
+        *,
+        audit: Optional[AuditEventRecord] = None,
     ) -> IntakeRecord:
         """Fail a proposing intake while retaining an expired reservation."""
         if reason not in RESERVATION_FAILURE_REASONS:
@@ -735,6 +811,7 @@ class SQLiteStateStore:
                     current,
                 )
             updated = self._required_intake(connection, capture_id)
+            self._insert_audit(connection, audit)
             connection.commit()
             return updated
         except (StateStoreError, StateTransitionRefused):
@@ -752,6 +829,8 @@ class SQLiteStateStore:
         self,
         record: ProposalRecord,
         lease_token: str,
+        *,
+        audit: Optional[AuditEventRecord] = None,
     ) -> ProposalRecord:
         """Persist a proposal, consume its reservation, and enter proposed."""
         connection = self._proposal_connection("proposal completion")
@@ -814,6 +893,7 @@ class SQLiteStateStore:
                     "proposal completion lost its state comparison",
                     current,
                 )
+            self._insert_audit(connection, audit)
             connection.commit()
             return record
         except (StateStoreError, StateTransitionRefused):
@@ -831,6 +911,8 @@ class SQLiteStateStore:
         proposal_id: str,
         reason: str,
         failed_at: str,
+        *,
+        audit: Optional[AuditEventRecord] = None,
     ) -> IntakeRecord:
         """Fail an intake after its proposal row was safely persisted."""
         if reason not in DRAFT_FAILURE_REASONS:
@@ -869,6 +951,7 @@ class SQLiteStateStore:
                     current,
                 )
             updated = self._required_intake(connection, capture_id)
+            self._insert_audit(connection, audit)
             connection.commit()
             return updated
         except (StateStoreError, StateTransitionRefused):
@@ -887,6 +970,8 @@ class SQLiteStateStore:
         capture_id: str,
         proposal_id: str,
         resumed_at: str,
+        *,
+        audit: Optional[AuditEventRecord] = None,
     ) -> IntakeRecord:
         """Restore a valid proposal-stage failure to proposed."""
         connection = self._proposal_connection("proposal draft resume")
@@ -928,6 +1013,7 @@ class SQLiteStateStore:
                     current,
                 )
             updated = self._required_intake(connection, capture_id)
+            self._insert_audit(connection, audit)
             connection.commit()
             return updated
         except (StateStoreError, StateTransitionRefused):
@@ -945,6 +1031,8 @@ class SQLiteStateStore:
         proposal_id: str,
         draft_note_path: str,
         registered_at: str,
+        *,
+        audit: Optional[AuditEventRecord] = None,
     ) -> ProposalRecord:
         """Register an exact draft and enter awaiting approval atomically."""
         connection = self._proposal_connection("proposal draft registration")
@@ -996,6 +1084,7 @@ class SQLiteStateStore:
                 connection.rollback()
                 raise StateStoreError("registered proposal disappeared")
             updated = _proposal_record(updated_row)
+            self._insert_audit(connection, audit)
             connection.commit()
             return updated
         except (StateStoreError, StateTransitionRefused):
@@ -1022,7 +1111,12 @@ class SQLiteStateStore:
             raise StateStoreError(f"approval queue lookup failed: {error}") from error
         return tuple(_intake_record(row) for row in rows)
 
-    def record_approval(self, record: ApprovalRecord) -> IntakeRecord:
+    def record_approval(
+        self,
+        record: ApprovalRecord,
+        *,
+        audit: Optional[AuditEventRecord] = None,
+    ) -> IntakeRecord:
         """Record one human decision and transition its intake atomically."""
         if (
             record.decision not in APPROVAL_DECISIONS
@@ -1104,6 +1198,7 @@ class SQLiteStateStore:
                     current,
                 )
             updated = self._required_intake(connection, capture_id)
+            self._insert_audit(connection, audit)
             connection.commit()
             return updated
         except (StateStoreError, StateTransitionRefused):
@@ -1136,6 +1231,8 @@ class SQLiteStateStore:
         proposal_id: str,
         approval_id: str,
         committed_at: str,
+        *,
+        audit: Optional[AuditEventRecord] = None,
     ) -> IntakeRecord:
         """Commit an approved note and mark its intake filed atomically."""
         connection = self._proposal_connection("filing")
@@ -1187,6 +1284,7 @@ class SQLiteStateStore:
                     current,
                 )
             updated = self._required_intake(connection, capture_id)
+            self._insert_audit(connection, audit)
             connection.commit()
             return updated
         except (StateStoreError, StateTransitionRefused):
@@ -1197,6 +1295,37 @@ class SQLiteStateStore:
             if connection.in_transaction:
                 connection.rollback()
             raise StateStoreError(f"filing failed: {error}") from error
+
+    def append_audit_event(self, record: AuditEventRecord) -> None:
+        """Append one event for an action that transitioned nothing."""
+        connection = self._proposal_connection("audit emission")
+        try:
+            self._insert_audit(connection, record)
+            connection.commit()
+        except StateStoreError:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        except sqlite3.Error as error:
+            if connection.in_transaction:
+                connection.rollback()
+            raise StateStoreError(f"audit emission failed: {error}") from error
+
+    def _insert_audit(
+        self,
+        connection: sqlite3.Connection,
+        audit: Optional[AuditEventRecord],
+    ) -> None:
+        """Write a transition's event inside the transition's own transaction."""
+        if audit is None:
+            return
+        connection.execute(
+            "INSERT INTO audit_event (event_id, trace_id, capture_id, actor, "
+            "action, outcome, detail, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            tuple(
+                getattr(_validated_audit(audit), column) for column in AUDIT_COLUMNS
+            ),
+        )
 
     def _proposal_connection(self, operation: str) -> sqlite3.Connection:
         try:

@@ -9,6 +9,7 @@ from enum import Enum
 from typing import Callable, Optional
 from uuid import UUID, uuid4
 
+from .audit import OUTCOMES, AuditTrail
 from .data_access import (
     IntakeRecord,
     IntakeRegistrationStatus,
@@ -53,8 +54,21 @@ class CaptureService:
         self._evidence_store = evidence_store
         self._id_factory = id_factory
         self._clock = clock
+        self._audit = AuditTrail(state_store, clock=clock)
 
     def capture(self, text: str) -> CaptureResult:
+        result = self._capture(text)
+        if result.status is not CaptureStatus.CAPTURED:
+            # Nothing was registered, so no transition carried this outcome.
+            self._audit.record(
+                "command.capture",
+                OUTCOMES[result.status.value],
+                capture_id=result.capture_id,
+                detail={"status": result.status.value, "reason": result.reason},
+            )
+        return result
+
+    def _capture(self, text: str) -> CaptureResult:
         try:
             raw_bytes = text.encode("utf-8")
         except UnicodeEncodeError as error:
@@ -180,7 +194,15 @@ class CaptureService:
             trace_id=evidence.capture_id,
         )
         try:
-            registration = self._state_store.register_intake(record)
+            registration = self._state_store.register_intake(
+                record,
+                audit=self._audit.event(
+                    "capture.written",
+                    "success",
+                    capture_id=record.capture_id,
+                    detail={"state": "captured", "content_hash": record.content_hash},
+                ),
+            )
         except StateStoreError as error:
             return CaptureResult(
                 CaptureStatus.FAILED,

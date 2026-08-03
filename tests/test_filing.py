@@ -354,13 +354,16 @@ class UnapprovedWriteTests(FilingFixture):
         self.assertEqual(table_row_count(self.store, "intake"), 0)
         self.assertEqual(table_row_count(self.store, "approval"), 0)
 
-    def test_an_invalid_capture_id_never_reaches_the_state_store(self) -> None:
+    def test_an_invalid_capture_id_is_refused_before_any_lookup(self) -> None:
         for capture_id in ("", "not-a-uuid", "../../etc/passwd", "8F14E45F" * 4):
             with self.subTest(capture_id=capture_id):
                 result = self._service().file(capture_id)
 
                 self.assertEqual(result.status, FilingStatus.FAILED)
                 self.assertEqual(result.reason, "filing.capture_id_invalid")
+        # The refusals are recorded; nothing was looked up or transitioned.
+        self.assertEqual(table_row_count(self.store, "audit_event"), 4)
+        self.assertEqual(table_row_count(self.store, "intake"), 0)
 
 
 class FilingConsistencyTests(FilingFixture):

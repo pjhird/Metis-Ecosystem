@@ -7,9 +7,10 @@
 > `metis/data_access/migrations/001_initial.sql`; migration `002_unique_classification_capture.sql` enforces one
 > classification per capture; migration `003_proposal_reservation.sql` adds reservation-first proposal state,
 > the expanded proposal contract, and replay uniqueness; migration `004_unique_approval_proposal.sql` enforces
-> one approval per proposal. Source, classification-response, proposal-response, canonical proposal-content,
-> and proposed-draft storage are implemented, as is approval detection and recording. Permanent filing,
-> linking, and audit behavior remain unimplemented.
+> one approval per proposal; migration `005_audit_event_append_only.sql` makes `audit_event` refuse every
+> update and delete. Source, classification-response, proposal-response, canonical proposal-content, and
+> proposed-draft storage are implemented, as are approval detection and recording, permanent filing and
+> linking, and audit emission across every transition.
 
 ## Scope
 
@@ -226,7 +227,14 @@ Append-only. Never updated, never deleted.
 | `created_at` | TEXT | |
 
 `refused` is a first-class outcome. A blocked unapproved write is a successful enforcement and must be
-recorded as such, not as an error.
+recorded as such, not as an error. A `duplicate` — a replayed capture, proposal, or filing — is refused for
+the same reason: nothing new was written.
+
+The orchestrator builds every event; the data layer only writes it (ADR-007). A transition carries its
+event into the transition's own transaction, so the two commit together or neither does — one event per
+transition, structurally. An action that transitions nothing appends its event on its own, under
+`command.<name>`. Migration 005 refuses every `UPDATE` and `DELETE` on this table, so "never updated, never
+deleted" is enforced rather than promised. Nothing reads the trail yet; `metis status` is unimplemented.
 
 ---
 

@@ -97,7 +97,7 @@ class RepositorySkeletonTests(unittest.TestCase):
             },
         )
 
-    def test_step_six_governed_documentation_is_current(self) -> None:
+    def test_step_seven_governed_documentation_is_current(self) -> None:
         agents = (REPOSITORY_ROOT / "AGENTS.md").read_text(encoding="utf-8")
         schemas = (REPOSITORY_ROOT / "METIS-SCHEMAS.md").read_text(encoding="utf-8")
         ledger = (REPOSITORY_ROOT / "METIS-REQUIREMENT-LEDGER.md").read_text(
@@ -110,7 +110,8 @@ class RepositorySkeletonTests(unittest.TestCase):
         self.assertIn("### 2.4 `proposal_reservation`", schemas)
         self.assertIn("`004_unique_approval_proposal.sql`", schemas)
         self.assertIn("metis file <capture-id>", agents)
-        self.assertIn("build-order step 6", ledger)
+        self.assertIn("`005_audit_event_append_only.sql`", schemas)
+        self.assertIn("build-order step 7", ledger)
         for requirement, expected in (
             ("REQ-GOV-003", "| Verified |"),
             ("REQ-GOV-004", "| Verified |"),
@@ -119,7 +120,11 @@ class RepositorySkeletonTests(unittest.TestCase):
             ("REQ-INTK-002", "| Verified |"),
             ("REQ-INTK-004", "| Verified |"),
             ("REQ-VLT-004", "| Verified |"),
-            ("REQ-ORCH-004", "| Missing |"),
+            ("REQ-ORCH-004", "| Verified |"),
+            ("REQ-ORCH-001", "| Verified |"),
+            ("REQ-GOV-002", "| Verified |"),
+            ("REQ-INTK-005", "| Verified |"),
+            ("REQ-TEST-003", "| Verified |"),
         ):
             row = next(
                 line
