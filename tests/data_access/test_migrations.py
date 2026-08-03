@@ -217,6 +217,20 @@ class FakeStateStore:
     def record_approval(self, record: ApprovalRecord) -> IntakeRecord:
         raise NotImplementedError
 
+    def find_approval_by_proposal_id(
+        self, proposal_id: str
+    ) -> ApprovalRecord | None:
+        return None
+
+    def record_filing(
+        self,
+        capture_id: str,
+        proposal_id: str,
+        approval_id: str,
+        committed_at: str,
+    ) -> IntakeRecord:
+        raise NotImplementedError
+
 
 class MigrationTests(unittest.TestCase):
     def setUp(self) -> None:

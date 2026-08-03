@@ -341,16 +341,18 @@ class CliTests(unittest.TestCase):
         self.assertNotIn(str(blocked_root), stderr.getvalue())
         self.assertNotIn("blocks state", stderr.getvalue())
 
-    def test_cli_exposes_no_step_six_or_second_approval_surface(self):
+    def test_cli_exposes_no_second_approval_surface(self):
         forbidden = (
             ["approve", CAPTURE_ID],
             ["reject", CAPTURE_ID],
-            ["file", CAPTURE_ID],
             ["link", CAPTURE_ID],
             ["approvals", CAPTURE_ID],
             ["approvals", "--approve", CAPTURE_ID],
             ["propose", CAPTURE_ID, "--approve"],
             ["propose", CAPTURE_ID, "--status", "approved"],
+            ["file", CAPTURE_ID, "--approve"],
+            ["file", CAPTURE_ID, "--links", "goal.x"],
+            ["file"],
         )
         for argv in forbidden:
             with self.subTest(argv=argv):

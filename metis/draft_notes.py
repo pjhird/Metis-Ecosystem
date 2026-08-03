@@ -26,6 +26,10 @@ LINKS_HEADER = b"links:\n"
 LINK_PREFIX = b'  - "[['
 LINK_SUFFIX = b']]"\n'
 LINK_TARGET = re.compile(r"[A-Za-z0-9._-]+")
+STAGE_STATUS = {
+    "proposed": DraftStatus.PROPOSED,
+    "filed": DraftStatus.APPROVED,
+}
 
 
 @dataclass(frozen=True)
@@ -59,6 +63,18 @@ def render_proposed_draft(
     proposal: ProposalRecord,
     canonical_body: bytes,
 ) -> bytes:
+    return render_note(proposal, canonical_body)
+
+
+def render_note(
+    proposal: ProposalRecord,
+    canonical_body: bytes,
+    *,
+    status: DraftStatus = DraftStatus.PROPOSED,
+    links: Tuple[str, ...] = (),
+    approved: Optional[str] = None,
+) -> bytes:
+    """Render one note. The proposed draft and the filed note share this."""
     try:
         body = canonical_body.decode("utf-8")
         confidence = json.dumps(
@@ -77,6 +93,15 @@ def render_proposed_draft(
     def scalar(value: str) -> str:
         return json.dumps(value, ensure_ascii=False)
 
+    if any(LINK_TARGET.fullmatch(target) is None for target in links) or len(
+        set(links)
+    ) != len(links):
+        raise DraftNoteConsistencyError("note links are invalid")
+    rendered_links = (
+        "links: []\n"
+        if not links
+        else "links:\n" + "".join(f'  - "[[{target}]]"\n' for target in links)
+    )
     lines = (
         "---\n"
         f"id: {scalar(f'note.{proposal.capture_id}')}\n"
@@ -85,10 +110,10 @@ def render_proposed_draft(
         f"capture_id: {scalar(proposal.capture_id)}\n"
         f"type: {scalar(proposal.note_type)}\n"
         f"title: {scalar(proposal.title)}\n"
-        "status: proposed\n"
+        f"status: {status.value}\n"
         "verification: unverified\n"
         f"created: {scalar(proposal.created_at)}\n"
-        "approved: null\n"
+        f"approved: {'null' if approved is None else scalar(approved)}\n"
         f"confidence: {confidence}\n"
         f"sensitivity: {proposal.sensitivity}\n"
         f"risk_level: {proposal.risk_level}\n"
@@ -98,15 +123,29 @@ def render_proposed_draft(
         f"{scalar(f'classification-evidence/{proposal.classification_id}/raw-response.txt')}\n"
         "  proposal: "
         f"{scalar(f'proposal-evidence/{proposal.proposal_id}/raw-response.txt')}\n"
-        "links: []\n"
+        f"{rendered_links}"
         "---\n\n"
     )
     return lines.encode("utf-8") + body.encode("utf-8")
 
 
 class DraftNoteStore:
-    def __init__(self, runtime_root: Path) -> None:
+    """Exclusive storage for one vault note stage.
+
+    `proposed` holds drafts awaiting a decision; `filed` holds permanent notes.
+    Both share this store so the exclusive-create, fsync, and read-back write
+    path has exactly one implementation.
+    """
+
+    def __init__(
+        self,
+        runtime_root: Path,
+        *,
+        stage: str = "proposed",
+    ) -> None:
         self._runtime_root = Path(runtime_root)
+        self._stage = stage
+        self._expected_status = STAGE_STATUS[stage]
 
     def create(
         self,
@@ -127,7 +166,7 @@ class DraftNoteStore:
                 relative_path,
             )
         try:
-            self._validate_expected_bytes(expected_bytes)
+            status, links = self._validate_expected_bytes(expected_bytes)
         except (TypeError, UnicodeError, ValueError) as error:
             raise DraftNoteWriteError(
                 f"draft content is invalid: {error}",
@@ -154,13 +193,7 @@ class DraftNoteStore:
                 "draft readback disagrees with expected bytes",
                 relative_path,
             )
-        return self._record(
-            relative_path,
-            observed,
-            DraftStatus.PROPOSED,
-            (),
-            path,
-        )
+        return self._record(relative_path, observed, status, links, path)
 
     def validate(
         self,
@@ -249,9 +282,9 @@ class DraftNoteStore:
             raise TypeError("draft path is not a string")
         relative = Path(relative_path)
         if relative.is_absolute() or len(relative.parts) != 4:
-            raise ValueError("draft path is outside the proposed vault directory")
-        if relative.parts[:3] != ("vault", "notes", "proposed"):
-            raise ValueError("draft path is outside the proposed vault directory")
+            raise ValueError("draft path is outside the staged vault directory")
+        if relative.parts[:3] != ("vault", "notes", self._stage):
+            raise ValueError("draft path is outside the staged vault directory")
         filename = relative.parts[3]
         if not filename.startswith("note.") or not filename.endswith(".md"):
             raise ValueError("draft filename is invalid")
@@ -266,7 +299,7 @@ class DraftNoteStore:
         if current.is_symlink() or (current.exists() and not current.is_dir()):
             raise ValueError("runtime root is not a real directory")
         current.mkdir(parents=True, exist_ok=True)
-        for part in ("vault", "notes", "proposed"):
+        for part in ("vault", "notes", self._stage):
             current = current / part
             try:
                 current.mkdir(exist_ok=True)
@@ -281,27 +314,49 @@ class DraftNoteStore:
         current = self._runtime_root
         if current.is_symlink() or not current.is_dir():
             raise ValueError("runtime root is not a real directory")
-        for part in ("vault", "notes", "proposed"):
+        for part in ("vault", "notes", self._stage):
             current = current / part
             if current.is_symlink() or not current.is_dir():
                 raise ValueError("draft parent is not a real directory")
         if current != expected_parent:
             raise ValueError("draft parent disagrees with path contract")
 
-    def _validate_expected_bytes(self, expected_bytes: bytes) -> None:
+    def _validate_expected_bytes(
+        self,
+        expected_bytes: bytes,
+    ) -> Tuple[DraftStatus, Tuple[str, ...]]:
         if type(expected_bytes) is not bytes or not expected_bytes:
-            raise ValueError("expected draft bytes are invalid")
+            raise ValueError("expected note bytes are invalid")
         expected_bytes.decode("utf-8")
         if not expected_bytes.startswith(b"---\n"):
-            raise ValueError("expected draft frontmatter is invalid")
+            raise ValueError("expected note frontmatter is invalid")
         frontmatter_end = expected_bytes.find(b"---\n\n", len(b"---\n"))
         if frontmatter_end == -1:
-            raise ValueError("expected draft frontmatter is invalid")
+            raise ValueError("expected note frontmatter is invalid")
         frontmatter = expected_bytes[len(b"---\n") : frontmatter_end]
-        if frontmatter.splitlines(keepends=True).count(b"status: proposed\n") != 1:
-            raise ValueError("expected draft status field is invalid")
-        if not frontmatter.endswith(EMPTY_LINKS):
-            raise ValueError("expected draft links field is invalid")
+        lines = frontmatter.splitlines(keepends=True)
+        status_line = f"status: {self._expected_status.value}\n".encode("utf-8")
+        if lines.count(status_line) != 1:
+            raise ValueError("expected note status field is invalid")
+        self._validate_provenance(lines)
+        if self._stage == "proposed" and not frontmatter.endswith(EMPTY_LINKS):
+            raise ValueError("expected note links field is invalid")
+        starts = [
+            index for index, line in enumerate(lines) if line.startswith(b"links:")
+        ]
+        if len(starts) != 1 or starts[0] == 0:
+            raise ValueError("expected note links field is invalid")
+        links = self._parsed_links(b"".join(lines[starts[0] :]))
+        return self._expected_status, links
+
+    def _validate_provenance(self, lines: list) -> None:
+        """A note without capture_id or evidence is invalid (REQ-VLT-004)."""
+        if (
+            sum(line.startswith(b"capture_id: ") for line in lines) != 1
+            or lines.count(b"evidence:\n") != 1
+            or sum(line.startswith(b"  capture: ") for line in lines) != 1
+        ):
+            raise ValueError("note provenance is missing")
 
     def _record(
         self,

@@ -77,7 +77,17 @@ The command emits one stable JSON object. `captured`, `duplicate`, and `refused`
 
 Set `ANTHROPIC_API_KEY` in the environment to use the real adapter. `METIS_CLASSIFICATION_MODEL` may override the pinned `claude-sonnet-4-6` model. Credentials are not stored by Metis. `classified`, `duplicate`, and policy `refused` results use standard output and exit 0; operational `failed` results use standard error and exit 1.
 
-The recorded verification used deterministic fake-adapter integration tests and fake-client Claude adapter tests; no paid live Claude call was run. Classification does not produce a proposal or draft, create or modify a vault, approve or file a permanent note, link a goal or project, or emit audit events. `metis approvals` and `metis status` are not implemented.
+The recorded verification used deterministic fake-adapter integration tests and fake-client Claude adapter tests; no paid live Claude call was run. Classification itself does not produce a proposal or draft, approve or file a permanent note, link a goal or project, or emit audit events.
+
+## Approval and Filing
+
+`metis propose <capture_id>` writes a `status: proposed` draft to `vault/notes/proposed/`. You edit two fields in Obsidian and nothing else: `status`, which authorizes, and `links`, which points at goal or project notes you wrote by hand (ADR-020).
+
+`metis approvals` reads that status field and records one decision per proposal. It writes nothing to the vault and files nothing.
+
+`metis file <capture_id>` performs the permanent write. It refuses unless the intake is `approved` with an uncommitted approval record, revalidates the whole evidence chain and the draft bytes, resolves every link against an existing note's `id` in `vault/goals/` or `vault/projects/`, and only then writes `vault/notes/filed/note.<capture_id>.md` and marks the intake `filed`. An unresolvable or absent link blocks the write without invalidating the approval — add the link and run it again. `filed`, `duplicate`, and `refused` use standard output and exit 0; `failed` uses standard error and exits 1.
+
+Audit events (`metis status`) are not implemented; that is build-order step 7.
 
 ## How Claude Code and Codex Get the Information
 
