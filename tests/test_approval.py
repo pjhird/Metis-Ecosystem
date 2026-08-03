@@ -14,6 +14,7 @@ from metis.approval import (
     ApprovalStatus,
 )
 from metis.data_access import SQLiteStateStore
+from metis.evidence import EvidenceStore
 from metis.draft_notes import DraftNoteStore, render_proposed_draft
 from metis.proposal_content import ProposalContentStore
 from tests.data_access.inspection import (
@@ -62,6 +63,7 @@ class ApprovalServiceTests(unittest.TestCase):
             self.store,
             ProposalContentStore(self.root),
             DraftNoteStore(self.root),
+            EvidenceStore(self.root),
             self.root,
             id_factory=lambda: next(self.identifiers),
             clock=lambda: datetime(2026, 8, 2, 11, 0, 0, tzinfo=timezone.utc),
@@ -453,6 +455,7 @@ class ApprovalServiceTests(unittest.TestCase):
             BrokenStore(),
             ProposalContentStore(self.root),
             DraftNoteStore(self.root),
+            EvidenceStore(self.root),
             self.root,
         )
 

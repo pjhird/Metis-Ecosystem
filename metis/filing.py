@@ -198,17 +198,14 @@ class FilingService:
                 proposal_id=proposal.proposal_id,
                 intake_state=intake.state,
             )
-        if (
-            validated_prior_state(
-                self._evidence_store,
-                self._classification_store,
-                self._runtime_root,
-                intake,
-                classification,
-            )
-            is None
-            or not self._proposal_evidence_is_valid(proposal)
-        ):
+        source = validated_prior_state(
+            self._evidence_store,
+            self._classification_store,
+            self._runtime_root,
+            intake,
+            classification,
+        )
+        if source is None or not self._proposal_evidence_is_valid(proposal):
             return self._failed(
                 intake.capture_id,
                 "filing.evidence_chain_broken",
@@ -228,7 +225,9 @@ class FilingService:
         try:
             draft = self._draft_store.validate(
                 proposal.draft_note_path,
-                render_proposed_draft(proposal, body),
+                render_proposed_draft(
+                    proposal, body, parent_goal_id=source.parent_goal_id
+                ),
             )
         except DraftNoteError:
             return self._failed(
@@ -272,6 +271,7 @@ class FilingService:
                 status=DraftStatus.APPROVED,
                 links=links,
                 approved=approval.detected_at,
+                parent_goal_id=source.parent_goal_id,
             )
         except DraftNoteError:
             return self._failed(

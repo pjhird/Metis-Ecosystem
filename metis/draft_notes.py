@@ -59,11 +59,32 @@ class DraftNoteWriteError(DraftNoteError):
     """Raised when a new draft cannot be finalized."""
 
 
+def _planning_field(note_type: str, parent_goal_id: Optional[str]) -> str:
+    """The one frontmatter line a planning note adds, written by the system.
+
+    A goal's horizon is the ratified default; a project names its parent goal.
+    Neither is human-editable — ADR-020 still allows only `status` and `links`.
+    """
+    if (note_type == "project") != (parent_goal_id is not None):
+        raise DraftNoteConsistencyError(
+            "a project note requires a parent goal, and only a project may carry one"
+        )
+    if note_type == "goal":
+        return "horizon: annual\n"
+    if note_type == "project":
+        if LINK_TARGET.fullmatch(parent_goal_id) is None:
+            raise DraftNoteConsistencyError("parent goal is not a valid note id")
+        return f'goal: "[[{parent_goal_id}]]"\n'
+    return ""
+
+
 def render_proposed_draft(
     proposal: ProposalRecord,
     canonical_body: bytes,
+    *,
+    parent_goal_id: Optional[str] = None,
 ) -> bytes:
-    return render_note(proposal, canonical_body)
+    return render_note(proposal, canonical_body, parent_goal_id=parent_goal_id)
 
 
 def render_note(
@@ -73,6 +94,7 @@ def render_note(
     status: DraftStatus = DraftStatus.PROPOSED,
     links: Tuple[str, ...] = (),
     approved: Optional[str] = None,
+    parent_goal_id: Optional[str] = None,
 ) -> bytes:
     """Render one note. The proposed draft and the filed note share this."""
     try:
@@ -102,6 +124,7 @@ def render_note(
         if not links
         else "links:\n" + "".join(f'  - "[[{target}]]"\n' for target in links)
     )
+    planning_field = _planning_field(proposal.note_type, parent_goal_id)
     lines = (
         "---\n"
         f"id: {scalar(f'note.{proposal.capture_id}')}\n"
@@ -110,6 +133,7 @@ def render_note(
         f"capture_id: {scalar(proposal.capture_id)}\n"
         f"type: {scalar(proposal.note_type)}\n"
         f"title: {scalar(proposal.title)}\n"
+        f"{planning_field}"
         f"status: {status.value}\n"
         "verification: unverified\n"
         f"created: {scalar(proposal.created_at)}\n"

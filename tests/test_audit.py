@@ -255,6 +255,7 @@ class AuditTrailTests(unittest.TestCase):
                     raced,
                     ProposalContentStore(root),
                     DraftNoteStore(root),
+                    EvidenceStore(root),
                     root,
                 ).review()
                 trail = audit_event_rows(store)

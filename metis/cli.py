@@ -91,6 +91,7 @@ def main(
                     state_store,
                     ProposalContentStore(root),
                     DraftNoteStore(root),
+                    EvidenceStore(root),
                     root,
                 ).review()
             elif arguments.command == "file":
