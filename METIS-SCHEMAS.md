@@ -296,7 +296,9 @@ horizon: annual         # long-term · annual · quarterly  (system default: ann
 created: 2026-07-28
 capture_id: 8f14e45f-ea3c-4f7a-9f2d-6c8b5a1d3e70
 evidence:
-  capture: evidence/8f14e45f-ea3c-4f7a-9f2d-6c8b5a1d3e70/raw.txt
+  capture: "evidence/8f14e45f-ea3c-4f7a-9f2d-6c8b5a1d3e70/raw.txt"
+  classification: "classification-evidence/01K1D5Q5M00000000000000000/raw-response.txt"
+  proposal: "proposal-evidence/01K1D5Q5P00000000000000000/raw-response.txt"
 links: []               # empty is allowed — a goal has nothing above it
 ---
 ```
@@ -318,7 +320,9 @@ goal: "[[goal.personal-systems-aaaaaaaa]]"
 created: 2026-07-28
 capture_id: 8f14e45f-ea3c-4f7a-9f2d-6c8b5a1d3e70
 evidence:
-  capture: evidence/8f14e45f-ea3c-4f7a-9f2d-6c8b5a1d3e70/raw.txt
+  capture: "evidence/8f14e45f-ea3c-4f7a-9f2d-6c8b5a1d3e70/raw.txt"
+  classification: "classification-evidence/01K1D5Q5M00000000000000000/raw-response.txt"
+  proposal: "proposal-evidence/01K1D5Q5P00000000000000000/raw-response.txt"
 links: []               # parent lives in `goal:`; links may stay empty
 runtime: none           # none · docker   (ADR-011)
 runtime_ref: null       # path to container definition when runtime is docker
@@ -337,7 +341,7 @@ path unchanged). Drafts for every type — including pinned goals and projects �
 
 ```yaml
 ---
-id: note.01J8X2K4P7M3QRSTVWXYZ0ABCD
+id: note.8f14e45f-ea3c-4f7a-9f2d-6c8b5a1d3e70   # `note.<capture_id>`
 type: idea              # idea · reference · decision · question · task
 title: Batch weekly review into Sunday evening
 status: proposed        # proposed · approved · rejected   ← ADR-005: the approval field
@@ -345,7 +349,10 @@ verification: unverified # unverified · verified
 created: 2026-07-28
 approved: null          # timestamp, set on commit
 capture_id: 8f14e45f-ea3c-4f7a-9f2d-6c8b5a1d3e70
-evidence: evidence/8f14e45f-ea3c-4f7a-9f2d-6c8b5a1d3e70/raw.txt
+evidence:
+  capture: "evidence/8f14e45f-ea3c-4f7a-9f2d-6c8b5a1d3e70/raw.txt"
+  classification: "classification-evidence/01K1D5Q5M00000000000000000/raw-response.txt"
+  proposal: "proposal-evidence/01K1D5Q5P00000000000000000/raw-response.txt"
 confidence: 0.82
 sensitivity: normal
 links:
@@ -366,7 +373,9 @@ Rules:
 - Link rules by effective type (ADR-021): a **typed note** needs ≥1 resolvable link; a **goal** may file with
   `links: []`; a **project** names its parent in system-written `goal:` and may use `links: []`.
 - `capture_id` and `evidence` are mandatory on typed notes, goals, and projects — a note without provenance
-  is invalid (REQ-VLT-004).
+  is invalid (REQ-VLT-004). `evidence` is a map, never a scalar: every rendered note carries `capture`,
+  `classification`, and `proposal`. Validation's floor is `capture_id`, the `evidence:` key, and a `capture:`
+  path; a note missing any of the three is refused.
 - `verification` is separate from `status`. Approving that a note should exist is not the same as verifying
   its content is true (REQ-DATA-005).
 - Every present link must resolve to an existing note — matched against the `id` field of a note in
