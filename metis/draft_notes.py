@@ -26,17 +26,26 @@ LINKS_HEADER = b"links:\n"
 LINK_PREFIX = b'  - "[['
 LINK_SUFFIX = b']]"\n'
 LINK_TARGET = re.compile(r"[A-Za-z0-9._-]+")
-STAGE_STATUS = {
-    "proposed": DraftStatus.PROPOSED,
-    "filed": DraftStatus.APPROVED,
+# stage -> (vault directory, note-id prefix, the status a note in it carries).
+# A filed planning note enters its own lifecycle at `active` (ADR-021); only the
+# approval surface speaks `DraftStatus`, so `active` is never a draft status.
+STAGES = {
+    "proposed": (("vault", "notes", "proposed"), "note.", DraftStatus.PROPOSED.value),
+    "filed": (("vault", "notes", "filed"), "note.", DraftStatus.APPROVED.value),
+    "goals": (("vault", "goals"), "goal.", "active"),
+    "projects": (("vault", "projects"), "proj.", "active"),
 }
+PLANNING_STAGES = {"goal": "goals", "project": "projects"}
+CAPTURE_NAMED_STAGES = ("proposed", "filed")
 
 
 @dataclass(frozen=True)
 class DraftNoteRecord:
     draft_path: str
     content_hash: str
-    observed_status: DraftStatus
+    # A `DraftStatus` when read off the approval surface; a stage's own status
+    # word (`active`) when a planning note is created.
+    observed_status: str
     observed_links: Tuple[str, ...]
     path: Path
 
@@ -91,10 +100,11 @@ def render_note(
     proposal: ProposalRecord,
     canonical_body: bytes,
     *,
-    status: DraftStatus = DraftStatus.PROPOSED,
+    status: str = DraftStatus.PROPOSED.value,
     links: Tuple[str, ...] = (),
     approved: Optional[str] = None,
     parent_goal_id: Optional[str] = None,
+    note_id: Optional[str] = None,
 ) -> bytes:
     """Render one note. The proposed draft and the filed note share this."""
     try:
@@ -127,14 +137,14 @@ def render_note(
     planning_field = _planning_field(proposal.note_type, parent_goal_id)
     lines = (
         "---\n"
-        f"id: {scalar(f'note.{proposal.capture_id}')}\n"
+        f"id: {scalar(note_id or f'note.{proposal.capture_id}')}\n"
         f"proposal_id: {scalar(proposal.proposal_id)}\n"
         f"classification_id: {scalar(proposal.classification_id)}\n"
         f"capture_id: {scalar(proposal.capture_id)}\n"
         f"type: {scalar(proposal.note_type)}\n"
         f"title: {scalar(proposal.title)}\n"
         f"{planning_field}"
-        f"status: {status.value}\n"
+        f"status: {status}\n"
         "verification: unverified\n"
         f"created: {scalar(proposal.created_at)}\n"
         f"approved: {'null' if approved is None else scalar(approved)}\n"
@@ -156,9 +166,10 @@ def render_note(
 class DraftNoteStore:
     """Exclusive storage for one vault note stage.
 
-    `proposed` holds drafts awaiting a decision; `filed` holds permanent notes.
-    Both share this store so the exclusive-create, fsync, and read-back write
-    path has exactly one implementation.
+    `proposed` holds drafts awaiting a decision; `filed`, `goals`, and
+    `projects` hold permanent notes. They share this store so the
+    exclusive-create, fsync, and read-back write path has exactly one
+    implementation.
     """
 
     def __init__(
@@ -169,7 +180,7 @@ class DraftNoteStore:
     ) -> None:
         self._runtime_root = Path(runtime_root)
         self._stage = stage
-        self._expected_status = STAGE_STATUS[stage]
+        self._parts, self._prefix, self._expected_status = STAGES[stage]
 
     def create(
         self,
@@ -305,17 +316,21 @@ class DraftNoteStore:
         if not isinstance(relative_path, str):
             raise TypeError("draft path is not a string")
         relative = Path(relative_path)
-        if relative.is_absolute() or len(relative.parts) != 4:
+        if relative.is_absolute() or len(relative.parts) != len(self._parts) + 1:
             raise ValueError("draft path is outside the staged vault directory")
-        if relative.parts[:3] != ("vault", "notes", self._stage):
+        if relative.parts[:-1] != self._parts:
             raise ValueError("draft path is outside the staged vault directory")
-        filename = relative.parts[3]
-        if not filename.startswith("note.") or not filename.endswith(".md"):
+        filename = relative.parts[-1]
+        if not filename.startswith(self._prefix) or not filename.endswith(".md"):
             raise ValueError("draft filename is invalid")
-        capture_id = filename[len("note.") : -len(".md")]
-        capture_uuid = UUID(capture_id)
-        if capture_uuid.version != 4 or str(capture_uuid) != capture_id:
-            raise ValueError("draft filename does not contain a canonical UUID4")
+        note_id = filename[: -len(".md")]
+        if LINK_TARGET.fullmatch(note_id) is None:
+            raise ValueError("draft filename is not a linkable note id")
+        if self._stage in CAPTURE_NAMED_STAGES:
+            capture_id = note_id[len(self._prefix) :]
+            capture_uuid = UUID(capture_id)
+            if capture_uuid.version != 4 or str(capture_uuid) != capture_id:
+                raise ValueError("draft filename does not contain a canonical UUID4")
         return self._runtime_root / relative
 
     def _prepare_parents(self, expected_parent: Path) -> None:
@@ -323,7 +338,7 @@ class DraftNoteStore:
         if current.is_symlink() or (current.exists() and not current.is_dir()):
             raise ValueError("runtime root is not a real directory")
         current.mkdir(parents=True, exist_ok=True)
-        for part in ("vault", "notes", self._stage):
+        for part in self._parts:
             current = current / part
             try:
                 current.mkdir(exist_ok=True)
@@ -338,7 +353,7 @@ class DraftNoteStore:
         current = self._runtime_root
         if current.is_symlink() or not current.is_dir():
             raise ValueError("runtime root is not a real directory")
-        for part in ("vault", "notes", self._stage):
+        for part in self._parts:
             current = current / part
             if current.is_symlink() or not current.is_dir():
                 raise ValueError("draft parent is not a real directory")
@@ -348,7 +363,7 @@ class DraftNoteStore:
     def _validate_expected_bytes(
         self,
         expected_bytes: bytes,
-    ) -> Tuple[DraftStatus, Tuple[str, ...]]:
+    ) -> Tuple[str, Tuple[str, ...]]:
         if type(expected_bytes) is not bytes or not expected_bytes:
             raise ValueError("expected note bytes are invalid")
         expected_bytes.decode("utf-8")
@@ -359,7 +374,7 @@ class DraftNoteStore:
             raise ValueError("expected note frontmatter is invalid")
         frontmatter = expected_bytes[len(b"---\n") : frontmatter_end]
         lines = frontmatter.splitlines(keepends=True)
-        status_line = f"status: {self._expected_status.value}\n".encode("utf-8")
+        status_line = f"status: {self._expected_status}\n".encode("utf-8")
         if lines.count(status_line) != 1:
             raise ValueError("expected note status field is invalid")
         self._validate_provenance(lines)
@@ -386,7 +401,7 @@ class DraftNoteStore:
         self,
         relative_path: str,
         observed: bytes,
-        status: DraftStatus,
+        status: str,
         links: Tuple[str, ...],
         path: Path,
     ) -> DraftNoteRecord:

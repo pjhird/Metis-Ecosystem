@@ -3,12 +3,27 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from typing import Callable
 
 
 ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 ALPHABET_SET = frozenset(ALPHABET)
+SLUG_LIMIT = 40
+SLUG_SEPARATOR = re.compile(r"[^a-z0-9]+")
+
+
+def note_slug(title: str, capture_id: str) -> str:
+    """`<title-slug>-<capture fragment>` for a planning note id (ADR-021).
+
+    Pure in its inputs, so filing derives the same name every replay and never
+    probes the vault for a free one. The capture fragment keeps two goals that
+    share a title apart; a title with nothing usable in it leaves the fragment.
+    """
+    slug = SLUG_SEPARATOR.sub("-", title.lower()).strip("-")[:SLUG_LIMIT].strip("-")
+    fragment = capture_id.replace("-", "")[:8]
+    return f"{slug}-{fragment}" if slug else fragment
 
 
 def new_ulid(
