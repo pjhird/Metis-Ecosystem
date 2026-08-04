@@ -37,6 +37,8 @@ INTAKE_COLUMNS = (
     "state_updated_at",
     "failure_reason",
     "trace_id",
+    "type_pin",
+    "parent_id",
 )
 CLASSIFICATION_COLUMNS = (
     "classification_id",
@@ -258,21 +260,42 @@ class SQLiteStateStore:
             self._apply(migration)
             current_version = migration.version
 
-    def find_intake_by_content_hash(
+    def find_intake_by_pin_key(
         self,
         content_hash: str,
+        type_pin: str,
+        parent_id: str,
     ) -> Optional[IntakeRecord]:
-        """Return the intake row registered for a content hash, if one exists."""
+        """Return the intake row registered for a uniqueness key, if one exists."""
         try:
             row = self._connect().execute(
                 "SELECT capture_id, content_hash, captured_at, source_type, "
-                "evidence_path, state, state_updated_at, failure_reason, trace_id "
-                "FROM intake WHERE content_hash = ?",
-                (content_hash,),
+                "evidence_path, state, state_updated_at, failure_reason, trace_id, "
+                "type_pin, parent_id "
+                "FROM intake "
+                "WHERE content_hash = ? AND type_pin = ? AND parent_id = ?",
+                (content_hash, type_pin, parent_id),
             ).fetchone()
         except sqlite3.Error as error:
             raise StateStoreError(f"intake lookup failed: {error}") from error
         return None if row is None else _intake_record(row)
+
+    def find_intakes_by_content_hash(
+        self,
+        content_hash: str,
+    ) -> Tuple[IntakeRecord, ...]:
+        """Return every intake row sharing a content hash, ordered by capture ID."""
+        try:
+            rows = self._connect().execute(
+                "SELECT capture_id, content_hash, captured_at, source_type, "
+                "evidence_path, state, state_updated_at, failure_reason, trace_id, "
+                "type_pin, parent_id "
+                "FROM intake WHERE content_hash = ? ORDER BY capture_id",
+                (content_hash,),
+            ).fetchall()
+        except sqlite3.Error as error:
+            raise StateStoreError(f"intake lookup failed: {error}") from error
+        return tuple(_intake_record(row) for row in rows)
 
     def find_intake_by_capture_id(
         self,
@@ -342,8 +365,9 @@ class SQLiteStateStore:
             connection.execute(
                 "INSERT INTO intake ("
                 "capture_id, content_hash, captured_at, source_type, evidence_path, "
-                "state, state_updated_at, failure_reason, trace_id"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "state, state_updated_at, failure_reason, trace_id, "
+                "type_pin, parent_id"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 tuple(getattr(record, column) for column in INTAKE_COLUMNS),
             )
             self._insert_audit(connection, audit)
@@ -359,7 +383,9 @@ class SQLiteStateStore:
         except sqlite3.IntegrityError as error:
             if connection is not None:
                 connection.rollback()
-            existing = self.find_intake_by_content_hash(record.content_hash)
+            existing = self.find_intake_by_pin_key(
+                record.content_hash, record.type_pin, record.parent_id
+            )
             if existing is not None:
                 return IntakeRegistrationResult(
                     IntakeRegistrationStatus.DUPLICATE,
@@ -1103,7 +1129,8 @@ class SQLiteStateStore:
         try:
             rows = self._connect().execute(
                 "SELECT capture_id, content_hash, captured_at, source_type, "
-                "evidence_path, state, state_updated_at, failure_reason, trace_id "
+                "evidence_path, state, state_updated_at, failure_reason, trace_id, "
+                "type_pin, parent_id "
                 "FROM intake WHERE state = 'awaiting_approval' "
                 "ORDER BY state_updated_at, capture_id"
             ).fetchall()
@@ -1376,7 +1403,8 @@ class SQLiteStateStore:
     ) -> Optional[tuple]:
         return connection.execute(
             "SELECT capture_id, content_hash, captured_at, source_type, "
-            "evidence_path, state, state_updated_at, failure_reason, trace_id "
+            "evidence_path, state, state_updated_at, failure_reason, trace_id, "
+            "type_pin, parent_id "
             "FROM intake WHERE capture_id = ?",
             (capture_id,),
         ).fetchone()

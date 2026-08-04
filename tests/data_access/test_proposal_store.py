@@ -43,6 +43,8 @@ def intake_record(**changes: object) -> IntakeRecord:
         "state_updated_at": CAPTURED_AT,
         "failure_reason": None,
         "trace_id": CAPTURE_ID,
+        "type_pin": "",
+        "parent_id": "",
     }
     values.update(changes)
     return IntakeRecord(**values)

@@ -31,6 +31,8 @@ EXPECTED_COLUMNS = {
         "state_updated_at",
         "failure_reason",
         "trace_id",
+        "type_pin",
+        "parent_id",
     ),
     "classification": (
         "classification_id",
@@ -124,8 +126,15 @@ class FakeStateStore:
     def close(self) -> None:
         return None
 
-    def find_intake_by_content_hash(self, content_hash: str) -> IntakeRecord | None:
+    def find_intake_by_pin_key(
+        self, content_hash: str, type_pin: str, parent_id: str
+    ) -> IntakeRecord | None:
         return None
+
+    def find_intakes_by_content_hash(
+        self, content_hash: str
+    ) -> tuple[IntakeRecord, ...]:
+        return ()
 
     def find_intake_by_capture_id(self, capture_id: str) -> IntakeRecord | None:
         return None
@@ -428,7 +437,7 @@ class MigrationTests(unittest.TestCase):
     def test_migrations_create_six_operational_tables(self) -> None:
         store = self._initialize()
 
-        self.assertEqual(store.schema_version, 6)
+        self.assertEqual(store.schema_version, 7)
         with sqlite3.connect(self.database_path) as connection:
             rows = connection.execute(
                 "SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name"
@@ -796,7 +805,7 @@ class MigrationTests(unittest.TestCase):
     def test_reapplying_migrations_is_idempotent(self) -> None:
         store = self._initialize()
         store.initialize()
-        self.assertEqual(store.schema_version, 6)
+        self.assertEqual(store.schema_version, 7)
         self.assertEqual(self._columns("intake"), EXPECTED_COLUMNS["intake"])
 
     def test_migration_preserves_existing_intake_and_classification_rows(self) -> None:
@@ -824,7 +833,7 @@ class MigrationTests(unittest.TestCase):
             )
         store = self._initialize()
 
-        self.assertEqual(store.schema_version, 6)
+        self.assertEqual(store.schema_version, 7)
         with sqlite3.connect(self.database_path) as connection:
             intake_count = connection.execute("SELECT COUNT(*) FROM intake").fetchone()
             classification_count = connection.execute(
@@ -913,13 +922,13 @@ class MigrationTests(unittest.TestCase):
     def test_newer_database_schema_fails_closed(self) -> None:
         self.database_path.parent.mkdir(parents=True)
         with sqlite3.connect(self.database_path) as connection:
-            connection.execute("PRAGMA user_version = 7")
+            connection.execute("PRAGMA user_version = 8")
         store = SQLiteStateStore(self.database_path)
         self.addCleanup(store.close)
 
         with self.assertRaisesRegex(
             MigrationError,
-            "database schema version 7 is newer than supported version 6",
+            "database schema version 8 is newer than supported version 7",
         ):
             store.initialize()
 
@@ -984,7 +993,7 @@ class MigrationTests(unittest.TestCase):
 
         store = self._initialize()
 
-        self.assertEqual(store.schema_version, 6)
+        self.assertEqual(store.schema_version, 7)
         with sqlite3.connect(self.database_path) as connection:
             self.assertEqual(
                 connection.execute("SELECT COUNT(*) FROM classification").fetchone(),

@@ -27,6 +27,13 @@ class IntakeRecord:
     state_updated_at: str
     failure_reason: Optional[str]
     trace_id: str
+    # A derived projection of the capture pin, carried here for the uniqueness
+    # key and consistency checks only. Evidence meta is the record of what was
+    # captured (ADR-003); routing, rendering, and parent resolution read the pin
+    # from there, never from these columns (ADR-022 clause 9). Never None: the
+    # empty string is the sentinel for an unpinned capture.
+    type_pin: str
+    parent_id: str
 
 
 @dataclass(frozen=True)
@@ -131,11 +138,19 @@ class StateStore(Protocol):
     def close(self) -> None:
         """Release resources held by the store."""
 
-    def find_intake_by_content_hash(
+    def find_intake_by_pin_key(
         self,
         content_hash: str,
+        type_pin: str,
+        parent_id: str,
     ) -> Optional[IntakeRecord]:
-        """Return the intake row registered for a content hash, if one exists."""
+        """Return the intake row registered for a uniqueness key, if one exists."""
+
+    def find_intakes_by_content_hash(
+        self,
+        content_hash: str,
+    ) -> Tuple[IntakeRecord, ...]:
+        """Return every intake row sharing a content hash, ordered by capture ID."""
 
     def find_intake_by_capture_id(
         self,
