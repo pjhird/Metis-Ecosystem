@@ -186,3 +186,18 @@ metis approvals            # read the vault status field and record each human d
 metis file <capture-id>    # file one approved note with provenance and resolved links
 metis status               # not yet implemented
 ```
+
+## Cursor Cloud specific instructions
+
+Non-obvious notes for this VM (standard commands are in `README.md`). Keep this file <= 200 lines; a
+governance test enforces it.
+
+- No third-party runtime deps: the `metis` package and tests use only the stdlib (Python 3.11+; VM has 3.12).
+- `requirements.txt` (`cursor-sdk`) is only for the optional `scripts/metis_build.py` helper, not the app or
+  tests. Do not install it to run/test the application.
+- Run without installing: `PYTHONPATH=. python3 -m metis capture "<text>"`. The `metis` console script exists
+  only after `pip install`; the system Python is PEP 668 externally-managed, so prefer `python3 -m metis`.
+- Capture writes `state/metis.db` and `evidence/` under the CWD (git-ignored); run from a scratch dir.
+- No lint step: CI runs only `python3 -m unittest discover -s tests -v`.
+- The packaging test builds a wheel and a venv, needing the `python3.12-venv` system package (`ensurepip`) and
+  `setuptools`; both are baked into the VM image. An `ensurepip is not available` failure means it is missing.
