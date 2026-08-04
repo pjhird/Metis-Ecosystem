@@ -204,7 +204,7 @@ Must record:
 
     Resolving a task's parent only against `vault/projects/` is what makes a goal id an unresolvable parent rather than a silently accepted one.
 
-**Migration detail (supports clause 9).** One migration adds `type_pin` and `parent_id` as `NOT NULL DEFAULT ''` and replaces `UNIQUE(content_hash)` with `UNIQUE(content_hash, type_pin, parent_id)`. Existing rows take the sentinel from the column default; no separate backfill statement is needed, and pre-existing planning captures keep their pin of record in evidence meta. New writes populate the projection from the pin in the intake transaction (clause 9).
+**Migration detail (supports clause 9).** One migration adds `type_pin` and `parent_id` as `NOT NULL DEFAULT ''` and replaces `UNIQUE(content_hash)` with `UNIQUE(content_hash, type_pin, parent_id)`. SQLite cannot drop a column-level `UNIQUE`, so this is the drop/recreate/refill rebuild migration 006 established, and existing rows take the sentinel through the refill `SELECT` rather than from the declared default — either way the migration contains no backfill statement, and pre-existing planning captures keep their pin of record in evidence meta. New writes populate the projection from the pin in the intake transaction (clause 9).
 
 Ship as **ADR-only PR** on `adr/022-planning-task-capture`, merge before `step/09-planning-tasks` (or equivalent) code. Clauses 9–10 (and the ADR header supersession line + migration paragraph) are constraints and **must** appear in that ADR-only PR; the §9 tests and the verification-exemption line in §3 are evidence and may ride with the implementation PR.
 

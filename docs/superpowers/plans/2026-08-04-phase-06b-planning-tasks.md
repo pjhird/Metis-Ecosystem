@@ -1046,6 +1046,26 @@ class PlanningTaskFiling(unittest.TestCase):
         self.assertEqual(len(list((self.vault / "tasks").iterdir())), 1)
         self.assertTrue((self.vault / "notes" / "filed" / f"note.{typed}.md").is_file())
 
+    def test_a_typed_task_note_with_no_links_is_refused(self) -> None:
+        """The links-absent gate must read the pin, not `note_type`.
+
+        `PLANNING_STAGES` gains `task` in Task 7, and a classifier-typed note
+        carries `note_type == "task"` with no pin, so a gate left on `note_type`
+        would hand an ordinary typed note the planning exemption and file it with
+        no link at all (ADR-022 clause 6 / clause 11). No existing test covers
+        this: both `filing.links_absent` tests use a non-task type, and
+        `planning_task_and_typed_note_task_are_distinguishable` gives its typed
+        note a link, so without this case the regression lands silently.
+        """
+        capture_id = self._approved_typed_note(note_type="task", link=None)
+
+        result = self._run(["file", capture_id])
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["reason"], "filing.links_absent")
+        self.assertFalse((self.vault / "tasks").exists())
+        self.assertFalse((self.vault / "notes" / "filed").exists())
+
     def test_task_filing_emits_audit_with_effective_type_and_parent(self) -> None:
         capture_id = self._approved_task(parent="proj.weekly-7d4e8eb8")
 
@@ -1110,9 +1130,34 @@ Build the helpers on the existing planning-notes test harness in `tests/test_pla
 
 Expected: FAIL — no `vault/tasks/` destination, no parent-project check.
 
+One exception: `test_a_typed_task_note_with_no_links_is_refused` is green before Step 3 and must **stay**
+green through it. It is a regression guard on the links-absent gate, not a red-to-green case — it passes
+today only because `PLANNING_STAGES` has no `task` key yet, and it is the test that fails if Step 3 widens
+that dict while leaving the gate on `note_type`.
+
 - [ ] **Step 3: Implement routing and the parent check**
 
-Route by pin rather than by `note_type`, so a classifier-typed `task` still files to `vault/notes/filed/`:
+`filing.py` reads `proposal.note_type` at **four** decision sites — the links-absent gate (`:258`), the
+parent check (`:276`), `_destination` (`:311`), and the store selection in `_commit` (`:329`). ADR-022
+clause 11 names the pin as the single routing input, so all four move to `source.type_pin` together.
+Converting three and leaving one is worse than converting none: Task 7 widens `PLANNING_STAGES` to include
+`task`, and `effective_type` gives a classifier-typed note `proposal.note_type == "task"` with no pin, so a
+gate left on `note_type` silently starts treating an ordinary typed note as a planning note.
+
+That is exactly what the links-absent gate would do. It hands planning notes their exemption from the
+`links` requirement, so on `note_type` a typed `task` with `links: []` would file into
+`vault/notes/filed/` with no link at all — contradicting clause 6 and spec §5. Move the gate to the pin
+and widen the comment to name the third planning type:
+
+```python
+        # A goal has nothing above it, a project names its parent in `goal:`, and
+        # a task names its parent in `project:`, so only a typed note has to earn
+        # its place with a link (ADR-021, ADR-022 clause 11 — the gate reads the
+        # pin, because a classifier-typed `task` is an ordinary note).
+        if not links and (source.type_pin or "") not in PLANNING_STAGES:
+```
+
+Then route by pin rather than by `note_type`, so a classifier-typed `task` still files to `vault/notes/filed/`:
 
 ```python
     def _destination(
@@ -1292,6 +1337,7 @@ Expect one note under `vault/tasks/` carrying `project: "[[proj.build-a-weekly-w
 
 - Every test named in spec §9 exists and passes, including `duplicate_plain_capture_still_creates_one_capture`, `intake_pin_columns_match_evidence_meta`, `v2_evidence_reads_its_parent_goal_as_parent_id`, and `a_legacy_unprojected_planning_row_fails_closed`.
 - The pre-existing `duplicate_replay_creates_one_note` still passes unchanged — it is the filed half of the replay proof.
+- `a_typed_task_note_with_no_links_is_refused` passes both before and after Task 8 Step 3 — it proves all four `note_type` sites in `filing.py` moved to the pin together (ADR-022 clause 11).
 - Full suite green on `step/09-planning-tasks`.
 - ADR-022 merged before any Task 2+ commit; every implementation commit carries `Decision: ADR-022`.
 - Ledger updated in the same PR as the tests that prove each row.
