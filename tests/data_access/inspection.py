@@ -58,6 +58,31 @@ def force_intake_state(
     store._connection.commit()
 
 
+def force_intake_pin(
+    store,
+    capture_id: str,
+    *,
+    type_pin: str,
+    parent_id: str,
+) -> None:
+    """Diverge the pin projection from its evidence, as a hand edit would."""
+    cursor = store._connection.execute(
+        "UPDATE intake SET type_pin = ?, parent_id = ? WHERE capture_id = ?",
+        (type_pin, parent_id, capture_id),
+    )
+    if cursor.rowcount != 1:
+        store._connection.rollback()
+        raise AssertionError("test intake pin mutation missed its row")
+    store._connection.commit()
+
+
+def intake_pin(store, capture_id: str) -> tuple[str, str]:
+    return store._connection.execute(
+        "SELECT type_pin, parent_id FROM intake WHERE capture_id = ?",
+        (capture_id,),
+    ).fetchone()
+
+
 def delete_approvals(store) -> None:
     store._connection.execute("DELETE FROM approval")
     store._connection.commit()

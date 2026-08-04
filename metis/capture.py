@@ -17,6 +17,7 @@ from .data_access import (
     StateStoreError,
 )
 from .evidence import (
+    PARENT_REQUIRED,
     PIN_TYPES,
     EvidenceCollision,
     EvidenceConsistencyError,
@@ -62,9 +63,9 @@ class CaptureService:
         text: str,
         *,
         type_pin: Optional[str] = None,
-        parent_goal_id: Optional[str] = None,
+        parent_id: Optional[str] = None,
     ) -> CaptureResult:
-        result = self._capture(text, type_pin, parent_goal_id)
+        result = self._capture(text, type_pin, parent_id)
         if result.status is not CaptureStatus.CAPTURED:
             # Nothing was registered, so no transition carried this outcome.
             self._audit.record(
@@ -79,7 +80,7 @@ class CaptureService:
         self,
         text: str,
         type_pin: Optional[str],
-        parent_goal_id: Optional[str],
+        parent_id: Optional[str],
     ) -> CaptureResult:
         # Refuse an incoherent pin before anything is written (ADR-021).
         if type_pin is not None and type_pin not in PIN_TYPES:
@@ -90,13 +91,13 @@ class CaptureService:
                 "pin_invalid",
                 f"type pin must be one of {sorted(PIN_TYPES)}",
             )
-        if (type_pin == "project") != (parent_goal_id is not None):
+        if (type_pin in PARENT_REQUIRED) != (parent_id is not None):
             return CaptureResult(
                 CaptureStatus.REFUSED,
                 None,
                 None,
                 "pin_incomplete",
-                "a project pin requires a parent goal, and only a project may carry one",
+                "a project or task pin requires a parent, and only they may carry one",
             )
 
         try:
@@ -111,27 +112,10 @@ class CaptureService:
             )
         content_hash = "sha256:" + hashlib.sha256(raw_bytes).hexdigest()
 
+        # Evidence resolves first: it is the immutable record, and which state
+        # row to look up depends on whether it already named a capture id.
         try:
-            existing = self._state_store.find_intake_by_content_hash(content_hash)
-        except StateStoreError as error:
-            return CaptureResult(
-                CaptureStatus.FAILED,
-                None,
-                None,
-                "state_lookup_failed",
-                str(error),
-            )
-
-        try:
-            matches = self._evidence_store.find_all_by_content_hash(content_hash)
-            # ponytail: Task 4 replaces this with the composite pin decision, which
-            # is what makes two parents legal. Until then one hash is one capture,
-            # so a second match stays the fail-closed inconsistency it is today.
-            if len(matches) > 1:
-                raise EvidenceConsistencyError(
-                    f"multiple evidence records match content hash: {content_hash}"
-                )
-            evidence = matches[0] if matches else None
+            candidates = self._evidence_store.find_all_by_content_hash(content_hash)
         except EvidenceConsistencyError as error:
             return CaptureResult(
                 CaptureStatus.FAILED,
@@ -141,17 +125,61 @@ class CaptureService:
                 str(error),
             )
 
-        # Identical text under a different pin is a different intent, not a replay.
-        # Both resolution paths below must refuse it, or one stays fail-open.
-        if evidence is not None and not self._pin_matches(
-            evidence, type_pin, parent_goal_id
-        ):
+        # Identical text under a different parent is a different intent, not a
+        # replay; identical text and parent under a different pin is a conflict.
+        # The conflict check runs first so a differing pin is never read as one.
+        conflicting = [
+            record
+            for record in candidates
+            if record.parent_id == parent_id and record.type_pin != type_pin
+        ]
+        if conflicting:
             return CaptureResult(
                 CaptureStatus.REFUSED,
-                evidence.capture_id,
-                evidence.evidence_path,
+                conflicting[0].capture_id,
+                conflicting[0].evidence_path,
                 "pin_conflict",
                 "this text was already captured under a different planning pin",
+            )
+        # Two parents are legal, two records under the *same* key are not: the
+        # intake unique key forbids the matching row, so picking one and
+        # continuing would fail open on corruption the old single-row lookup
+        # caught. Only an exact key collision is inconsistent now.
+        matching = [
+            record
+            for record in candidates
+            if record.type_pin == type_pin and record.parent_id == parent_id
+        ]
+        if len(matching) > 1:
+            return CaptureResult(
+                CaptureStatus.FAILED,
+                None,
+                None,
+                "evidence_inconsistent",
+                f"multiple evidence records match content hash: {content_hash}",
+            )
+        evidence = matching[0] if matching else None
+
+        # By capture id when evidence resolved one: a row written before ADR-022
+        # carries the sentinel while its evidence records a pin, so a pin-key
+        # lookup would miss it, fall through to registration, and collide on the
+        # primary key with no row to resolve against. The pin key still covers a
+        # state row with no evidence behind it, which must stay a mismatch.
+        try:
+            existing = (
+                self._state_store.find_intake_by_capture_id(evidence.capture_id)
+                if evidence is not None
+                else self._state_store.find_intake_by_pin_key(
+                    content_hash, type_pin or "", parent_id or ""
+                )
+            )
+        except StateStoreError as error:
+            return CaptureResult(
+                CaptureStatus.FAILED,
+                None,
+                None,
+                "state_lookup_failed",
+                str(error),
             )
 
         if existing is not None:
@@ -167,7 +195,7 @@ class CaptureService:
                 CaptureStatus.FAILED,
                 existing.capture_id,
                 existing.evidence_path,
-                "state_evidence_mismatch",
+                self._mismatch_reason(existing, evidence),
                 "state row and evidence do not agree",
             )
 
@@ -199,7 +227,7 @@ class CaptureService:
                 content_hash,
                 captured_at,
                 type_pin,
-                parent_goal_id,
+                parent_id,
             )
             evidence = self._evidence_store.validate_directory(evidence.directory)
         except EvidenceCollision as error:
@@ -245,6 +273,10 @@ class CaptureService:
             state_updated_at=evidence.captured_at,
             failure_reason=None,
             trace_id=evidence.capture_id,
+            # The projection: derived from evidence, carried only for the
+            # uniqueness key and the consistency check (ADR-022 clause 9).
+            type_pin=evidence.type_pin or "",
+            parent_id=evidence.parent_id or "",
         )
         try:
             registration = self._state_store.register_intake(
@@ -286,7 +318,7 @@ class CaptureService:
                 CaptureStatus.FAILED,
                 evidence.capture_id,
                 evidence.evidence_path,
-                "state_evidence_mismatch",
+                self._mismatch_reason(registration.record, evidence),
                 "state row and evidence do not agree",
             )
         return CaptureResult(
@@ -297,15 +329,30 @@ class CaptureService:
             "state registration reported a duplicate after evidence creation",
         )
 
+    @classmethod
+    def _mismatch_reason(
+        cls,
+        row: IntakeRecord,
+        evidence: Optional[EvidenceRecord],
+    ) -> str:
+        """Divergence has two causes, and they need different operator moves."""
+        if evidence is not None and cls._pin_is_unprojected(row, evidence):
+            return "intake_pin_unprojected"
+        return "state_evidence_mismatch"
+
     @staticmethod
-    def _pin_matches(
-        evidence: EvidenceRecord,
-        type_pin: Optional[str],
-        parent_goal_id: Optional[str],
-    ) -> bool:
+    def _pin_is_unprojected(row: IntakeRecord, evidence: EvidenceRecord) -> bool:
+        """A pre-ADR-022 row the migration could not project, not tampering.
+
+        Both columns must be empty. A half-projected row is deliberately left to
+        `state_evidence_mismatch`: no migration or application path produces
+        one, so the likeliest cause is a repair UPDATE run halfway, and that
+        should be investigated rather than re-run (ADR-022 clause 9).
+        """
         return (
-            evidence.type_pin == type_pin
-            and evidence.parent_id == parent_goal_id
+            row.type_pin == ""
+            and row.parent_id == ""
+            and (evidence.type_pin is not None or evidence.parent_id is not None)
         )
 
     def _row_matches_evidence(
@@ -323,4 +370,8 @@ class CaptureService:
             and row.state_updated_at == row.captured_at
             and row.failure_reason is None
             and row.trace_id == row.capture_id
+            # The projection must agree with the evidence it was derived from;
+            # divergence fails closed rather than preferring either side.
+            and row.type_pin == (evidence.type_pin or "")
+            and row.parent_id == (evidence.parent_id or "")
         )

@@ -43,6 +43,8 @@ def intake_record(expected_hash: str, **changes: object) -> IntakeRecord:
         "state_updated_at": CAPTURED_AT_TEXT,
         "failure_reason": None,
         "trace_id": str(CAPTURE_ID),
+        "type_pin": "",
+        "parent_id": "",
     }
     values.update(changes)
     return IntakeRecord(**values)
@@ -52,10 +54,17 @@ class InMemoryStateStore:
     def __init__(self) -> None:
         self.record: Optional[IntakeRecord] = None
 
-    def find_intake_by_content_hash(
-        self, content_hash: str
+    def find_intake_by_capture_id(self, capture_id: str) -> Optional[IntakeRecord]:
+        if self.record is None or self.record.capture_id != capture_id:
+            return None
+        return self.record
+
+    def find_intake_by_pin_key(
+        self, content_hash: str, type_pin: str, parent_id: str
     ) -> Optional[IntakeRecord]:
         if self.record is None or self.record.content_hash != content_hash:
+            return None
+        if (self.record.type_pin, self.record.parent_id) != (type_pin, parent_id):
             return None
         return self.record
 
@@ -70,15 +79,21 @@ class InMemoryStateStore:
 
 
 class ReturningStateStore(InMemoryStateStore):
-    def find_intake_by_content_hash(
-        self, content_hash: str
+    def find_intake_by_capture_id(self, capture_id: str) -> Optional[IntakeRecord]:
+        return self.record
+
+    def find_intake_by_pin_key(
+        self, content_hash: str, type_pin: str, parent_id: str
     ) -> Optional[IntakeRecord]:
         return self.record
 
 
 class LookupFailingStateStore(InMemoryStateStore):
-    def find_intake_by_content_hash(
-        self, content_hash: str
+    def find_intake_by_capture_id(self, capture_id: str) -> Optional[IntakeRecord]:
+        raise StateStoreError("lookup unavailable")
+
+    def find_intake_by_pin_key(
+        self, content_hash: str, type_pin: str, parent_id: str
     ) -> Optional[IntakeRecord]:
         raise StateStoreError("lookup unavailable")
 
@@ -136,10 +151,13 @@ class FailOnceRegistrationStore:
         self._store = store
         self._should_fail = True
 
-    def find_intake_by_content_hash(
-        self, content_hash: str
+    def find_intake_by_capture_id(self, capture_id: str) -> Optional[IntakeRecord]:
+        return self._store.find_intake_by_capture_id(capture_id)
+
+    def find_intake_by_pin_key(
+        self, content_hash: str, type_pin: str, parent_id: str
     ) -> Optional[IntakeRecord]:
-        return self._store.find_intake_by_content_hash(content_hash)
+        return self._store.find_intake_by_pin_key(content_hash, type_pin, parent_id)
 
     def append_audit_event(self, record) -> None:
         """Emission is asserted against the real store, not this fake."""
@@ -161,7 +179,7 @@ class WriteFailingEvidenceStore(EvidenceStore):
         content_hash: str,
         captured_at: str,
         type_pin: Optional[str] = None,
-        parent_goal_id: Optional[str] = None,
+        parent_id: Optional[str] = None,
     ) -> EvidenceRecord:
         raise EvidenceWriteError(
             "simulated evidence write failure",
@@ -471,12 +489,18 @@ class CaptureServiceTests(unittest.TestCase):
         self.assertTrue((directory / "meta.json").is_file())
         self.assertIsNone(self.state_store.record)
 
-    def test_state_lookup_failure_precedes_evidence_scan_and_factories(self) -> None:
+    def test_state_lookup_failure_precedes_minting_and_any_write(self) -> None:
+        """ADR-022 moves the evidence scan ahead of the state lookup.
+
+        Which state row to read depends on whether evidence already named a
+        capture id, so evidence must resolve first. The guarantee this test
+        exists for is unchanged: a state-store failure reports
+        `state_lookup_failed`, mints no id, and writes nothing. A corrupt
+        evidence directory is now reported first, as `evidence_inconsistent` —
+        also fail-closed — so this case keeps the evidence store clean to reach
+        the state lookup at all.
+        """
         evidence_store = EvidenceStore(self.runtime_root)
-        partial = self.runtime_root / "evidence" / str(CAPTURE_ID)
-        partial.mkdir(parents=True)
-        raw_path = partial / "raw.txt"
-        raw_path.write_bytes(b"unchanged")
         factory_calls = 0
 
         def id_factory() -> UUID:
@@ -497,7 +521,9 @@ class CaptureServiceTests(unittest.TestCase):
         self.assertEqual(result.reason, "state_lookup_failed")
         self.assertIsNone(result.evidence_path)
         self.assertEqual(factory_calls, 0)
-        self.assertEqual(raw_path.read_bytes(), b"unchanged")
+        # No evidence root at all: the previous assertion read a file capture
+        # never touches, so it could not have failed.
+        self.assertFalse((self.runtime_root / "evidence").exists())
 
     def test_registration_failure_preserves_finalized_evidence(self) -> None:
         text = "registration failure"
@@ -635,7 +661,7 @@ class CaptureServiceTests(unittest.TestCase):
         # clock again; audit emission also reads this clock, so the proof is
         # the recorded value below, not the number of reads.
         self.assertEqual(
-            sqlite_store.find_intake_by_content_hash(orphan.content_hash).captured_at,
+            sqlite_store.find_intake_by_capture_id(orphan.capture_id).captured_at,
             CAPTURED_AT_TEXT,
         )
         self.assertEqual(len(list((self.runtime_root / "evidence").iterdir())), 1)

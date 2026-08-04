@@ -70,7 +70,7 @@ def main(
                 result = CaptureService(state_store, EvidenceStore(root)).capture(
                     arguments.text,
                     type_pin=arguments.type_pin,
-                    parent_goal_id=arguments.parent_goal_id,
+                    parent_id=arguments.parent_goal_id,
                 )
             elif arguments.command == "classify":
                 if model_adapter_factory is None:
