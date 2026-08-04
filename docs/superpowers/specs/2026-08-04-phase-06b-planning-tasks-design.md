@@ -7,7 +7,7 @@
 - Base: `main` through `step-08-planning-notes-verified` (ADR-021 merged; docs honesty PR #13 merged)
 - Approach chosen: **Hybrid pin** — `metis capture --as task --project <proj.id>`; same capture → classify → propose → approve → file → audit loop
 - Parent contract: **project only** (mirrors project → goal)
-- Pinned uniqueness: **`content_hash + type_pin + parent_id`** with **no NULLs in the key** (empty-string sentinels; ADR-022 clause 9; amends ADR-014)
+- Intake uniqueness: **`content_hash + type_pin + parent_id`** for **all** intakes, with **no NULLs in the key** (`NOT NULL` columns, empty-string sentinels; ADR-022 clause 9; amends ADR-014)
 - Governing decisions today: ADR-001 … ADR-021 (esp. ADR-003, ADR-004, ADR-005, ADR-007, ADR-018, ADR-020, ADR-021)
 - **Blocked on:** a new ADR (proposed number **ADR-022**) recording planning-task creation rules before any code
 - Out of scope for this slice: outcomes, task↔task dependencies, decompose-project, calendar/task-manager writes, agents, execution spine, CLI-driven planning-status transitions
@@ -170,14 +170,18 @@ Must record:
 6. Disambiguation: typed-note `candidate_type: task` ≠ planning task entity.
 7. Narrows ADR-021 (tasks were out of scope there).
 8. Does not authorize outcomes, dependencies, decompose-project, agents, MCP, or external task managers.
-9. **Intake uniqueness key (data-layer assertion — must land in this ADR before code).** The uniqueness key for **all** intakes is `content_hash + type_pin + parent_id`, where `parent_id` is the typed parent pin (goal id for projects, project id for tasks). Identical text under two different parents is **two distinct captures**, not a replay. `pin_conflict` is reserved for identical `content_hash + parent_id` submitted under a differing `type_pin`. The constraint is a plain `UNIQUE(content_hash, type_pin, parent_id)`.
+9. **Intake uniqueness key (data-layer assertion — must land in this ADR before code).** The uniqueness key for **all** intakes is `content_hash + type_pin + parent_id`, where `parent_id` is the typed parent pin: the empty-string sentinel for unpinned captures **and for goals** (a goal has no parent), the goal id for projects, the project id for tasks. Identical text under two different parents is **two distinct captures**, not a replay. `pin_conflict` is reserved for identical `content_hash + parent_id` submitted under a differing `type_pin`. The constraint is a plain `UNIQUE(content_hash, type_pin, parent_id)`.
 
     `type_pin` and `parent_id` are `NOT NULL`; unpinned captures store the empty string in both. NULL is never used in the uniqueness key, because SQLite treats NULLs as distinct and a nullable column would silently disable replay protection for unpinned captures.
 
     Sentinels are chosen over a `COALESCE`/generated column deliberately: a generated column moves the semantics into an expression that no longer appears in the constraint a reader inspects, so `UNIQUE(content_hash, uniq_key)` cannot be understood without chasing the definition. The sentinel keeps the key legible where it is defined, and `NOT NULL` makes the hazard structurally impossible rather than handled — the same move as `notes/proposed/` over a status convention. It is also portable across the ADR-002 seam: Postgres `NULLS NOT DISTINCT` is version-gated and differs from SQLite's default, while a sentinel behaves identically on both.
+
+    `intake` has no pin columns today, so the migration adds `type_pin` and `parent_id` as `NOT NULL DEFAULT ''`: the sentinel arrives as the column default and there is no backfill step at all. Verified against the current store: three intake rows, `content_hash` unique, zero duplicates and no parent-differing captures — so replacing the single-column constraint with `UNIQUE(content_hash, type_pin, parent_id)` requires no reconciliation.
+
+    Putting the pin in a UNIQUE constraint promotes it from metadata to enforced state, so the ADR must bound what those columns are. The intake pin columns are a **derived projection** of the pin, written in the same transaction as the intake row; evidence meta remains the immutable record of what was captured (ADR-003). Divergence between the projection and evidence meta is a **fail-closed refusal**, never a silent preference for either side.
 10. **Planning status is lifecycle, not authorization.** On a filed task, `status: open` is a lifecycle field. Obsidian edits to it are **inert** in this slice (Metis does not treat them as approval, rejection, or progress). Approval remains the draft `status` flip recorded in SQLite + audit (ADR-005 / ADR-020). CLI transitions of planning status are deferred to a later ADR.
 
-**Migration / existing rows — no reindex required.** Step-08 is already verified on `main`, so this key replaces the existing `UNIQUE(content_hash)`. One migration adds `type_pin` and `parent_id` as `NOT NULL` columns, backfills them in the same migration (a one-line `UPDATE` writing the empty-string sentinel, or the recorded pin where evidence meta carries one), and installs `UNIQUE(content_hash, type_pin, parent_id)`. **No reindex or duplicate reconciliation is required:** the prior constraint already permitted at most one row per `content_hash`, and the intake table is small and pre-migration. If evidence meta is unreadable for a row, the migration fails closed rather than inventing a pin.
+**Migration detail (supports clause 9).** One migration adds `type_pin` and `parent_id` as `NOT NULL DEFAULT ''` and replaces `UNIQUE(content_hash)` with `UNIQUE(content_hash, type_pin, parent_id)`. Existing rows take the sentinel from the column default; no separate backfill statement is needed, and pre-existing planning captures keep their pin of record in evidence meta. New writes populate the projection from the pin in the intake transaction (clause 9).
 
 Ship as **ADR-only PR** on `adr/022-planning-task-capture`, merge before `step/09-planning-tasks` (or equivalent) code. Clauses 9–10 (and the ADR header supersession line + migration paragraph) are constraints and **must** appear in that ADR-only PR; the §9 tests and the verification-exemption line in §3 are evidence and may ride with the implementation PR.
 
@@ -201,9 +205,10 @@ Ship as **ADR-only PR** on `adr/022-planning-task-capture`, merge before `step/0
 - `planning_task_and_typed_note_task_are_distinguishable` — proves §3.1 / §8 clause 6
 - `task_filing_emits_audit_with_effective_type_and_parent` — proves §1.7 audit detail (required fields)
 - `duplicate_plain_capture_still_creates_one_note` — regression: composite key must not break unpinned replay (NULL/sentinel hazard in §8 clause 9)
+- `intake_pin_columns_match_evidence_meta` — proves §8 clause 9: the projection is written in the intake transaction and divergence from evidence meta is refused, not preferred away
 - Existing goal/project and step 5–7 suites stay green (update parent-differing replay tests to match §8 clause 9; keep founding `duplicate_replay_creates_one_note` green)
 
-These seven additions (and the verification-exemption line in §3) may land in the implementation PR as evidence. The uniqueness key, NULL/sentinel rule, ADR header supersession line, and migration paragraph in §8 may not — they must be asserted by ADR-022 first.
+These eight additions (and the verification-exemption line in §3) may land in the implementation PR as evidence. The uniqueness key, NULL/sentinel rule, projection-vs-evidence rule, ADR header supersession line, and migration paragraph in §8 may not — they must be asserted by ADR-022 first.
 
 ## 10. Ledger / docs updates (same implementation PR)
 
@@ -244,7 +249,7 @@ These seven additions (and the verification-exemption line in §3) may land in t
 4. **Classification:** still runs under pin; pin forces type only.
 5. **Parent visibility on draft:** yes — system-written `project:` on the proposed note; not editable.
 6. **Slug:** title-slug + 8 hex of capture_id (machine uniqueness, same family as goals/projects).
-7. **Intake uniqueness:** plain `UNIQUE(content_hash, type_pin, parent_id)`; both pin columns `NOT NULL` with empty-string sentinels (never NULL, never a generated column); one migration, no reindex; amends ADR-014 and supersedes the ADR-021 implementation's parent-conflict behavior.
+7. **Intake uniqueness:** plain `UNIQUE(content_hash, type_pin, parent_id)`; both pin columns `NOT NULL DEFAULT ''` (never NULL, never a generated column); one migration, no backfill, no reconciliation; pin columns are a derived projection with evidence meta as the record of truth and divergence refused; amends ADR-014 and supersedes the ADR-021 implementation's parent-conflict behavior.
 8. **Verification:** planning entities exempt from REQ-DATA-005's `verification` field.
 
 ## 14. Later slices (not this PR)
