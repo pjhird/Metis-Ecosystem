@@ -62,9 +62,15 @@ Single test:
 
 The existing code calls the parent `parent_goal_id` in `evidence.py`, `capture.py`, `draft_notes.py`, and `filing.py`. A task's parent is a project, so the field becomes **`parent_id`** everywhere, with the pin type saying what kind of parent it is. Evidence already written under schema_version 2 is immutable and keeps its `parent_goal_id` key; the reader maps it to `parent_id`. Do not leave two live names in new code.
 
-### Routing decision locked here
+### Routing rule (ADR-022 clause 11, not a plan decision)
 
-Filing chooses the vault stage from the **pin**, not from `proposal.note_type`. A classifier-typed note may legitimately be `type: task` and must still file to `vault/notes/filed/`; only a pinned capture is a planning task. Every routing site reads `evidence.type_pin`.
+Filing chooses the vault stage from the **pin**, not from `proposal.note_type`. A classifier-typed note may legitimately be `type: task` and must still file to `vault/notes/filed/`; only a pinned capture is a planning task. Every routing site reads `evidence.type_pin`. Task 1 must land this as clause 11 before Task 8 implements it.
+
+### Where the v2 → v3 mapping lives
+
+Exactly one site: `EvidenceStore.validate_directory` (`metis/evidence.py:155-184`) is the only function that parses `meta.json` into an `EvidenceRecord`; `_validate_metadata` selects the key set by `schema_version`. Every other module — `capture.py`, `proposal.py`, `approval.py`, `filing.py`, `draft_notes.py` — reads the record attribute and never the file. Do not add a second reader; if a caller needs the pin, pass the record.
+
+Immutable v2 evidence is never rewritten (ADR-003). The projection in `intake` is used only for the uniqueness constraint and consistency checks; routing, rendering, and parent resolution read the pin from the evidence record (ADR-022 clause 9).
 
 ---
 
@@ -86,7 +92,7 @@ git checkout -b adr/022-planning-task-capture
 
 - [ ] **Step 2: Append ADR-022 to `METIS-DECISIONS.md`**
 
-Follow the existing ADR shape exactly (Context / Decision / Alternatives / Consequences / Reversal path / Revisit if). Copy clauses 1–10, the header line, and the migration paragraph from spec §8. The header must read:
+Follow the existing ADR shape exactly (Context / Decision / Alternatives / Consequences / Reversal path / Revisit if). Copy clauses 1–11, the header line, and the migration paragraph from spec §8. Clause 11 (routing reads the pin, never `note_type`) determines what code is legal, so it belongs in the ADR rather than in this plan. The header must read:
 
 > Amends ADR-014 (extends the uniqueness key for all intakes). Supersedes the parent-conflict behavior established in the ADR-021 implementation, under which a differing parent produced `pin_conflict`.
 
@@ -130,7 +136,8 @@ Decision: ADR-022"
 
 **Interfaces:**
 - Produces: `IntakeRecord(capture_id, content_hash, captured_at, source_type, evidence_path, state, state_updated_at, failure_reason, trace_id, type_pin: str, parent_id: str)` — both new fields are `str`, never `None`, `''` when absent.
-- Produces: `StateStore.find_intake_by_pin_key(content_hash: str, type_pin: str, parent_id: str) -> Optional[IntakeRecord]`
+- Produces: `StateStore.find_intake_by_pin_key(content_hash: str, type_pin: str, parent_id: str) -> Optional[IntakeRecord]` — used only where evidence did not already name a capture id (see Task 4)
+- Keeps: `StateStore.find_intake_by_capture_id(capture_id: str) -> Optional[IntakeRecord]` — unchanged, and the lookup capture prefers
 - Produces: `StateStore.find_intakes_by_content_hash(content_hash: str) -> Tuple[IntakeRecord, ...]` — used by capture to detect a conflicting pin.
 - Removes: `find_intake_by_content_hash` (single-row lookup is no longer well-defined).
 
@@ -380,7 +387,10 @@ def test_a_task_pin_without_a_parent_is_refused(self) -> None:
         self.store.create(CAPTURE_ID, RAW, CONTENT_HASH, CAPTURED_AT, "task", None)
 
 def test_v2_evidence_reads_its_parent_goal_as_parent_id(self) -> None:
-    """Evidence is immutable (ADR-003), so v2 directories are read, not rewritten."""
+    """Evidence is immutable (ADR-003), so v2 directories are read, not rewritten.
+
+    This is the only read-time mapping site; no other module parses meta.json.
+    """
     directory = self._write_v2_directory(type_pin="project", parent_goal_id="goal.abc")
 
     record = self.store.validate_directory(directory)
@@ -512,6 +522,21 @@ def test_intake_pin_columns_match_evidence_meta(self) -> None:
 
     self.assertIs(replay.status, CaptureStatus.FAILED)
     self.assertEqual(replay.reason, "state_evidence_mismatch")
+
+def test_a_legacy_unprojected_planning_row_fails_closed(self) -> None:
+    """A pre-ADR-022 row carries the sentinel while its evidence records a pin.
+
+    The migration reads *.sql only and cannot open evidence, so this state is
+    reachable on any store that predates ADR-022. It must refuse, not resolve.
+    """
+    first = self._capture(TEXT, type_pin="goal")
+    self._corrupt_intake_pin(first.capture_id, type_pin="", parent_id="")
+
+    replay = self._capture(TEXT, type_pin="goal")
+
+    self.assertIs(replay.status, CaptureStatus.FAILED)
+    self.assertEqual(replay.reason, "state_evidence_mismatch")
+    self.assertEqual(replay.capture_id, first.capture_id)
 ```
 
 `_corrupt_intake_pin` writes the divergent values directly with `sqlite3` in the test, simulating a hand-edited or half-migrated row.
@@ -566,10 +591,21 @@ Rename the parameter to `parent_id` throughout, and replace the two single-row l
             ),
             None,
         )
-        existing = self._state_store.find_intake_by_pin_key(
-            content_hash, type_pin or "", parent_id or ""
+```
+
+The state lookup must be **by capture id when evidence resolved it**, not by pin key. A row written before ADR-022 carries the sentinel while its evidence records a pin, so a pin-key lookup would miss it, fall through to `_register_evidence`, and collide on the `capture_id` primary key with no row to resolve against. Looking up the handle evidence already named turns that into the defined refusal `_row_matches_evidence` produces:
+
+```python
+        existing = (
+            self._state_store.find_intake_by_capture_id(evidence.capture_id)
+            if evidence is not None
+            else self._state_store.find_intake_by_pin_key(
+                content_hash, type_pin or "", parent_id or ""
+            )
         )
 ```
+
+`find_intake_by_pin_key` still covers the branch where a state row exists with no evidence behind it — that path must keep reporting `state_evidence_mismatch`.
 
 `_register_evidence` writes the projection when constructing `IntakeRecord`:
 
@@ -1169,6 +1205,21 @@ Test: test_agents_documents_the_task_capture_command"
 
 ---
 
+## Legacy rows in the owner's smoke store
+
+After migration 007, the three rows in `~/metis-smoke/state/metis.db` carry `type_pin = ''` and `parent_id = ''`. Two of them have evidence recording a pin — the goal `7d1200d2…` and the project `7d4e8eb8…` — so those rows diverge from their evidence by construction. Nothing filed is affected: filing reads the pin from evidence, and both notes are already in the vault. Only a replay of that exact text would touch them, and it fails closed as `state_evidence_mismatch`.
+
+If the owner wants replay to keep working on those two captures, the repair is two statements, run once, with Metis not running:
+
+```sql
+UPDATE intake SET type_pin = 'goal'
+ WHERE capture_id = '7d1200d2-5ff9-415e-a4ae-9a6f91a3723f';
+UPDATE intake SET type_pin = 'project', parent_id = '<the goal id in that capture''s meta.json>'
+ WHERE capture_id = '7d4e8eb8-32fd-459e-aa60-b91fdf2a371b';
+```
+
+Read the parent id from `evidence/7d4e8eb8-.../meta.json` rather than typing it from memory. This is housekeeping, not a code path: the plan builds no repair tooling.
+
 ## Live smoke (owner, after merge)
 
 Run in `~/metis-smoke` with `ANTHROPIC_API_KEY` exported. Edit drafts in Obsidian **Source mode** only — the Properties panel strips quotes and breaks `approved: null`.
@@ -1187,7 +1238,7 @@ Expect one note under `vault/tasks/` carrying `project: "[[proj.build-a-weekly-w
 
 ## Done when
 
-- Every test named in spec §9 exists and passes, including `duplicate_plain_capture_still_creates_one_note` and `intake_pin_columns_match_evidence_meta`.
+- Every test named in spec §9 exists and passes, including `duplicate_plain_capture_still_creates_one_note`, `intake_pin_columns_match_evidence_meta`, `v2_evidence_reads_its_parent_goal_as_parent_id`, and `a_legacy_unprojected_planning_row_fails_closed`.
 - Full suite green on `step/09-planning-tasks`.
 - ADR-022 merged before any Task 2+ commit; every implementation commit carries `Decision: ADR-022`.
 - Ledger updated in the same PR as the tests that prove each row.
