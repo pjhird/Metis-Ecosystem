@@ -64,7 +64,7 @@ The existing code calls the parent `parent_goal_id` in `evidence.py`, `capture.p
 
 **The name reaches seven production modules, not four.** `grep -rn parent_goal_id` on this branch also returns `metis/cli.py` (6), `metis/approval.py` (4), and `metis/proposal.py` (1). `approval.py:116-162` and `proposal.py:588` read `EvidenceRecord.parent_goal_id` and are owned by **no task** — they break the instant Task 3 renames the field, and `tests/test_approval.py` is green today, so leaving them raises the failure count. Task 3 owns them (see its Files list).
 
-**Repo-wide zero is not reachable until Task 8**, and Task 5 as written blocks it: its snippet keeps `capture_parser.add_argument("--goal", dest="parent_goal_id")`, which contradicts "do not leave two live names in new code". Open decision for Task 5 — rename the dest to `goal_id`, or record the CLI dest as the one documented exception. Not a Task 3 change. The check Task 3 can actually meet is scoped to one file:
+**Repo-wide zero lands at Task 9**, and every task between here and there owns its share: Task 4 `capture.py`, Task 5 `cli.py`, Task 7 `draft_notes.py`, Task 8 `filing.py`, Task 9 `METIS-SCHEMAS.md`. **Decided (owner, 2026-08-04):** Task 5 renames the argparse *dest* to `goal_id` / `project_id` while the *flags* stay `--goal` and `--project`. The dest is internal and the two parents should read symmetrically; leaving it as `parent_goal_id` is what would keep the rename from ever closing. The check Task 3 can meet is scoped to one file:
 
 ```bash
 grep -n parent_goal_id metis/evidence.py
@@ -758,25 +758,28 @@ Expected: FAIL — `--as` rejects `task`; `--project` is unknown.
     capture_parser.add_argument(
         "--as", dest="type_pin", choices=("goal", "project", "task")
     )
-    capture_parser.add_argument("--goal", dest="parent_goal_id")
-    capture_parser.add_argument("--project", dest="parent_project_id")
+    # The flags stay --goal / --project; the dests are internal and symmetric.
+    capture_parser.add_argument("--goal", dest="goal_id")
+    capture_parser.add_argument("--project", dest="project_id")
 ```
 
 ```python
-        if arguments.type_pin == "project" and arguments.parent_goal_id is None:
+        if arguments.type_pin == "project" and arguments.goal_id is None:
             parser.error("--as project requires --goal <goal-id>")
-        if arguments.type_pin == "task" and arguments.parent_project_id is None:
+        if arguments.type_pin == "task" and arguments.project_id is None:
             parser.error("--as task requires --project <project-id>")
-        if arguments.parent_goal_id is not None and arguments.type_pin != "project":
+        if arguments.goal_id is not None and arguments.type_pin != "project":
             parser.error("--goal is only valid with --as project")
-        if arguments.parent_project_id is not None and arguments.type_pin != "task":
+        if arguments.project_id is not None and arguments.type_pin != "task":
             parser.error("--project is only valid with --as task")
-        parent_id = arguments.parent_goal_id or arguments.parent_project_id
+        parent_id = arguments.goal_id or arguments.project_id
         if parent_id is not None and LINK_TARGET.fullmatch(parent_id) is None:
             parser.error("a parent must be a note id matching [A-Za-z0-9._-]+")
 ```
 
 Pass `parent_id=parent_id` to `CaptureService.capture`. `parser.error` exits before any evidence write, which is what `test_project_flag_without_task_pin_writes_no_evidence` proves.
+
+**The dest rename is this task's share of closing the `parent_goal_id` rename** (owner decision, recorded in "Naming decision locked here"). `cli.py` carries six occurrences today — the two dests, three validation reads, and the `parent_goal_id=` keyword passed to `capture()`, which Task 4 renames to `parent_id`. All six go here; `grep -n parent_goal_id metis/cli.py` must return nothing when this task is done. The user-facing flags do not change, so no test asserting `--goal` or `--project` text needs editing.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -1301,6 +1304,14 @@ Expected: FAIL — the command is not documented yet.
 
 `METIS-SCHEMAS.md`: add §4.3 Task (before the typed-note section, renumbering the typed note to §4.4) with the frontmatter block from spec §3, the disambiguation paragraph from spec §3.1, `tasks/` in the §4.4 vault layout, the `task` row in the filing-routes list, and a line recording that planning notes carry no `verification` field. Update the §2 intake table to show `type_pin` and `parent_id` as `NOT NULL` sentinel columns in the uniqueness key.
 
+**This task closes the rename.** `METIS-SCHEMAS.md:53` still shows `"parent_goal_id": null` in the evidence meta example and `:66` describes it in prose; both become `parent_id`, and the example's `schema_version` bumps from `2` to `3`. Add one sentence there recording that v2 evidence keeps the `parent_goal_id` key on disk and is mapped at read time, never rewritten (ADR-003) — otherwise the document contradicts the immutable evidence it describes. After this task:
+
+```bash
+grep -rn parent_goal_id metis METIS-SCHEMAS.md
+```
+
+must return only `metis/evidence.py`'s v2 key-set entry and read-time fallback, and the `METIS-SCHEMAS.md` sentence recording the v2 key. Nothing else.
+
 `AGENTS.md`: add the command line to the Commands block, mark build-order step 9 done, and move the current-phase paragraph to slice B complete / slice C (outcomes) not started.
 
 `METIS-REQUIREMENT-LEDGER.md`: update the review stamp, and extend REQ-INTK-001, REQ-INTK-002, REQ-INTK-004, REQ-VLT-002, and REQ-VLT-004 with the new test names. Do not mark anything Verified whose test has not been run in this branch.
@@ -1327,6 +1338,18 @@ Test: test_agents_documents_the_task_capture_command"
 - [ ] **Step 6: On owner go-ahead, push `step/09-planning-tasks` and open a draft PR against `main`**
 
 ---
+
+## Known defects, deliberately not fixed in this plan
+
+**`EvidenceStore._validate_pin` crashes on an unhashable `type_pin`.** `type_pin not in PIN_TYPES` tests membership in a frozenset, so a `meta.json` carrying `"type_pin": []` — valid JSON — raises `TypeError`. `validate_directory` catches `OSError`, `UnicodeError`, `JSONDecodeError`, and `ValueError`, so that escapes as a crash where rule 3 requires a fail-closed refusal.
+
+Pre-existing and unchanged by this plan; the owner ruled it out of scope on 2026-08-04 rather than widen a rename commit into a defect fix. It is recorded here so it is not lost with the session that found it. The fix mirrors the one Task 3 applied to `schema_version` — type before membership:
+
+```python
+if type_pin is not None and (type(type_pin) is not str or type_pin not in PIN_TYPES):
+```
+
+Reachable only by hand-editing evidence, which is already a fail-closed path for every other corruption; it degrades the refusal into a stack trace rather than admitting bad data. Worth its own `fix/` branch with a test in the `test_validation_rejects_invalid_metadata_types` family.
 
 ## Legacy rows in the owner's smoke store
 
