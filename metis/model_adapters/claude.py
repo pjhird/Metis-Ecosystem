@@ -29,28 +29,27 @@ CLASSIFICATION_SCHEMA = {
             "type": "string",
             "enum": ["normal", "sensitive"],
         },
+        # Bounds are enforced in parse_classification_response. Anthropic's
+        # structured-output schema rejects minimum/maximum on number fields.
         "confidence": {
             "type": "number",
-            "minimum": 0.0,
-            "maximum": 1.0,
         },
     },
     "required": ["candidate_type", "sensitivity", "confidence"],
     "additionalProperties": False,
 }
+# Length/item bounds are enforced in proposal_contract. Anthropic structured
+# output rejects minLength/maxLength/maxItems on the wire schema.
 PROPOSAL_SCHEMA = {
     "type": "object",
     "properties": {
-        "title": {"type": "string", "minLength": 1, "maxLength": 160},
-        "body": {"type": "string", "minLength": 1},
-        "reason": {"type": "string", "minLength": 1, "maxLength": 1000},
+        "title": {"type": "string"},
+        "body": {"type": "string"},
+        "reason": {"type": "string"},
         "uncertainties": {
             "type": "array",
-            "maxItems": 10,
             "items": {
                 "type": "string",
-                "minLength": 1,
-                "maxLength": 500,
             },
         },
     },
