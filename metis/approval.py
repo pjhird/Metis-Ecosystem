@@ -125,7 +125,7 @@ class ApprovalService:
             )
         except (EvidenceError, OSError, TypeError, ValueError):
             return None
-        return evidence.parent_goal_id
+        return evidence.parent_id
 
     def _review_one(self, intake: IntakeRecord) -> ApprovalResult:
         try:

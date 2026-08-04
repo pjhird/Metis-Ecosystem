@@ -123,7 +123,15 @@ class CaptureService:
             )
 
         try:
-            evidence = self._evidence_store.find_by_content_hash(content_hash)
+            matches = self._evidence_store.find_all_by_content_hash(content_hash)
+            # ponytail: Task 4 replaces this with the composite pin decision, which
+            # is what makes two parents legal. Until then one hash is one capture,
+            # so a second match stays the fail-closed inconsistency it is today.
+            if len(matches) > 1:
+                raise EvidenceConsistencyError(
+                    f"multiple evidence records match content hash: {content_hash}"
+                )
+            evidence = matches[0] if matches else None
         except EvidenceConsistencyError as error:
             return CaptureResult(
                 CaptureStatus.FAILED,
@@ -297,7 +305,7 @@ class CaptureService:
     ) -> bool:
         return (
             evidence.type_pin == type_pin
-            and evidence.parent_goal_id == parent_goal_id
+            and evidence.parent_id == parent_goal_id
         )
 
     def _row_matches_evidence(

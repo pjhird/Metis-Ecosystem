@@ -8,10 +8,10 @@ import re
 from datetime import datetime, timedelta
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 
-METADATA_KEYS = {
+_METADATA_KEYS_COMMON = {
     "capture_id",
     "content_hash",
     "captured_at",
@@ -20,16 +20,26 @@ METADATA_KEYS = {
     "byte_size",
     "mime_type",
     "type_pin",
-    "parent_goal_id",
     "schema_version",
 }
 
-# The human's planning intent, pinned at capture and never chosen by a model (ADR-021).
-PIN_TYPES = frozenset({"goal", "project"})
+# v2 named the parent `parent_goal_id` because only a project could carry one.
+# That evidence is immutable (ADR-003), so the key is read, never rewritten.
+METADATA_KEYS_V2 = _METADATA_KEYS_COMMON | {"parent_goal_id"}
+METADATA_KEYS_V3 = _METADATA_KEYS_COMMON | {"parent_id"}
+SCHEMA_VERSIONS = {2: ("parent_goal_id", METADATA_KEYS_V2), 3: ("parent_id", METADATA_KEYS_V3)}
+SCHEMA_VERSION = 3
+
+# The human's planning intent, pinned at capture and never chosen by a model
+# (ADR-021). A planning task exists only under a pin (ADR-022).
+PIN_TYPES = frozenset({"goal", "project", "task"})
+
+# A goal has nothing above it; a project names a goal and a task names a project.
+PARENT_REQUIRED = frozenset({"project", "task"})
 
 # ponytail: mirrors draft_notes.LINK_TARGET; kept local so persistence does not
 # import the vault layer. Keep the two in step if the id grammar ever changes.
-PARENT_GOAL_ID = re.compile(r"[A-Za-z0-9._-]+")
+PARENT_ID = re.compile(r"[A-Za-z0-9._-]+")
 
 
 @dataclass(frozen=True)
@@ -42,7 +52,7 @@ class EvidenceRecord:
     raw_path: Path
     meta_path: Path
     type_pin: Optional[str] = None
-    parent_goal_id: Optional[str] = None
+    parent_id: Optional[str] = None
 
 
 class EvidenceError(RuntimeError):
@@ -76,12 +86,20 @@ class EvidenceStore:
         content_hash: str,
         captured_at: str,
         type_pin: Optional[str] = None,
-        parent_goal_id: Optional[str] = None,
+        parent_id: Optional[str] = None,
     ) -> EvidenceRecord:
         evidence_path = f"evidence/{capture_id}"
         directory = self._evidence_root / capture_id
         raw_path = directory / "raw.txt"
         meta_path = directory / "meta.json"
+        # Refuse an incoherent pin before anything reaches disk, so a bad pin
+        # never leaves a half-written evidence directory behind.
+        try:
+            self._validate_pin(type_pin, parent_id)
+        except ValueError as error:
+            raise EvidenceWriteError(
+                f"evidence pin is invalid for {directory}: {error}", evidence_path
+            ) from error
         metadata = {
             "capture_id": capture_id,
             "content_hash": content_hash,
@@ -91,8 +109,8 @@ class EvidenceStore:
             "byte_size": len(raw_bytes),
             "mime_type": "text/plain",
             "type_pin": type_pin,
-            "parent_goal_id": parent_goal_id,
-            "schema_version": 2,
+            "parent_id": parent_id,
+            "schema_version": SCHEMA_VERSION,
         }
 
         try:
@@ -135,7 +153,7 @@ class EvidenceStore:
             raw_path=raw_path,
             meta_path=meta_path,
             type_pin=type_pin,
-            parent_goal_id=parent_goal_id,
+            parent_id=parent_id,
         )
 
     def validate_directory(self, directory: Path) -> EvidenceRecord:
@@ -180,16 +198,22 @@ class EvidenceStore:
             raw_path=raw_path,
             meta_path=meta_path,
             type_pin=metadata["type_pin"],
-            parent_goal_id=metadata["parent_goal_id"],
+            # The only v2 -> v3 mapping site in the system. Immutable v2 evidence
+            # keeps its `parent_goal_id` key; callers only ever see `parent_id`.
+            parent_id=metadata.get("parent_id", metadata.get("parent_goal_id")),
         )
 
-    def find_by_content_hash(self, content_hash: str) -> Optional[EvidenceRecord]:
-        """Find exactly one valid evidence record with the requested content hash."""
+    def find_all_by_content_hash(self, content_hash: str) -> Tuple[EvidenceRecord, ...]:
+        """Find every valid evidence record with the requested content hash.
+
+        Identical text under two different parents is two captures under
+        ADR-022, so more than one match is legal and no longer an inconsistency.
+        """
         try:
             if self._evidence_root.is_symlink():
                 raise ValueError("evidence root is not a directory")
             if not self._evidence_root.exists():
-                return None
+                return ()
             if not self._evidence_root.is_dir():
                 raise ValueError("evidence root is not a directory")
             children = sorted(self._evidence_root.iterdir(), key=lambda path: path.name)
@@ -200,12 +224,12 @@ class EvidenceStore:
             ) from error
 
         records = [self.validate_directory(child) for child in children]
-        matches = [record for record in records if record.content_hash == content_hash]
-        if len(matches) > 1:
-            raise EvidenceConsistencyError(
-                f"multiple evidence records match content hash: {content_hash}"
+        return tuple(
+            sorted(
+                (record for record in records if record.content_hash == content_hash),
+                key=lambda record: record.capture_id,
             )
-        return matches[0] if matches else None
+        )
 
     def _validated_capture_id(self, directory: Path) -> str:
         from uuid import UUID
@@ -217,7 +241,18 @@ class EvidenceStore:
         return capture_id
 
     def _validate_metadata(self, metadata: object, capture_id: str) -> None:
-        if not isinstance(metadata, dict) or set(metadata) != METADATA_KEYS:
+        # The version selects the key set, so it is read before the key set is
+        # compared — and with `.get`, because `validate_directory` catches
+        # `ValueError` but not `KeyError` and must refuse rather than crash.
+        if not isinstance(metadata, dict):
+            raise ValueError("metadata is not an object")
+        # Type before membership: SCHEMA_VERSIONS is a dict, so testing an
+        # unhashable value first would raise TypeError instead of refusing.
+        version = metadata.get("schema_version")
+        if type(version) is not int or version not in SCHEMA_VERSIONS:
+            raise ValueError("metadata schema_version is invalid")
+        parent_key, expected_keys = SCHEMA_VERSIONS[version]
+        if set(metadata) != expected_keys:
             raise ValueError("metadata keys do not match the evidence contract")
         expected_types = {
             "capture_id": str,
@@ -233,7 +268,7 @@ class EvidenceStore:
             if type(metadata[key]) is not expected_type:
                 raise ValueError(f"metadata {key} has an invalid type")
 
-        self._validate_pin(metadata["type_pin"], metadata["parent_goal_id"])
+        self._validate_pin(metadata["type_pin"], metadata[parent_key])
 
         timestamp = metadata["captured_at"]
         if not timestamp.endswith("Z"):
@@ -249,19 +284,18 @@ class EvidenceStore:
             raise ValueError("metadata source_detail is invalid")
         if metadata["mime_type"] != "text/plain":
             raise ValueError("metadata mime_type is invalid")
-        if metadata["schema_version"] != 2:
-            raise ValueError("metadata schema_version is invalid")
 
     @staticmethod
-    def _validate_pin(type_pin: object, parent_goal_id: object) -> None:
+    def _validate_pin(type_pin: object, parent_id: object) -> None:
         """A pin is either absent or a complete, well-formed planning intent."""
         if type_pin is not None and type_pin not in PIN_TYPES:
             raise ValueError("metadata type_pin is invalid")
-        if parent_goal_id is not None:
-            if type(parent_goal_id) is not str:
-                raise ValueError("metadata parent_goal_id has an invalid type")
-            if PARENT_GOAL_ID.fullmatch(parent_goal_id) is None:
-                raise ValueError("metadata parent_goal_id is invalid")
-        # A project names its parent goal; nothing else may carry one (ADR-021).
-        if (type_pin == "project") != (parent_goal_id is not None):
-            raise ValueError("metadata type_pin and parent_goal_id disagree")
+        if parent_id is not None:
+            if type(parent_id) is not str:
+                raise ValueError("metadata parent_id has an invalid type")
+            if PARENT_ID.fullmatch(parent_id) is None:
+                raise ValueError("metadata parent_id is invalid")
+        # A project names its goal and a task names its project; nothing else
+        # may carry a parent (ADR-021, ADR-022).
+        if (type_pin in PARENT_REQUIRED) != (parent_id is not None):
+            raise ValueError("metadata type_pin and parent_id disagree")

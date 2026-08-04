@@ -585,7 +585,7 @@ class ProposalService:
             )
         draft_path = f"vault/notes/proposed/note.{capture_id}.md"
         expected_draft = render_proposed_draft(
-            record, body_bytes, parent_goal_id=evidence.parent_goal_id
+            record, body_bytes, parent_goal_id=evidence.parent_id
         )
         try:
             draft = self._draft_store.create(draft_path, expected_draft)
