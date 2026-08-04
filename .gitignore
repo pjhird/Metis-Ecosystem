@@ -13,6 +13,7 @@ venv/
 # Python-generated artifacts
 __pycache__/
 *.py[cod]
+*.egg-info/
 .coverage
 htmlcov/
 
@@ -26,3 +27,5 @@ vault/
 *.db
 *.sqlite
 *.sqlite3
+
+*.egg-info/
