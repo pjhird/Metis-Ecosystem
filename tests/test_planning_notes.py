@@ -185,6 +185,52 @@ class PlanningFilingTests(PlanningFilingFixture):
         self.assertIn("goal.never-filed", result["message"])
         self.assertFalse((self.root / "vault" / "projects").exists())
 
+    def test_a_project_may_not_name_another_project_as_its_parent(self) -> None:
+        _, goal_id = self._goal()
+        first = self._proposed(
+            PROJECT_TEXT,
+            "--as",
+            "project",
+            "--goal",
+            goal_id,
+            title="Weekly measurement routine",
+        )
+        self._approve(first)
+        project_id = Path(self._run(["file", first])["filed_path"]).stem
+
+        second = self._proposed(
+            "Track the weekly numbers.",
+            "--as",
+            "project",
+            "--goal",
+            project_id,
+            title="Weekly number tracking",
+        )
+        self._approve(second)
+        result = self._run(["file", second])
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["reason"], "filing.parent_goal_unresolvable")
+        self.assertEqual(
+            sorted(path.name for path in (self.root / "vault" / "projects").iterdir()),
+            [f"{project_id}.md"],
+        )
+
+    def test_a_filed_goal_resolves_a_typed_notes_link(self) -> None:
+        """The point of creating goals: a typed note links to one Metis wrote."""
+        _, goal_id = self._goal()
+
+        capture_id = self._proposed(PLAIN_TEXT, title="Review the governed workflow")
+        self._approve(capture_id, links=f'links:\n  - "[[{goal_id}]]"\n'.encode())
+        filed = self._run(["file", capture_id])
+
+        self.assertEqual(filed["status"], "filed")
+        self.assertEqual(filed["links"], [goal_id])
+        self.assertEqual(
+            filed["filed_path"],
+            f"vault/notes/filed/note.{capture_id}.md",
+        )
+
     def test_a_goal_link_that_does_not_resolve_still_blocks_the_commit(self) -> None:
         capture_id = self._proposed(
             GOAL_TEXT, "--as", "goal", title="Establish a health baseline"
