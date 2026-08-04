@@ -49,7 +49,9 @@ evidence/
   "source_detail": "metis capture",
   "byte_size": 412,
   "mime_type": "text/plain",
-  "schema_version": 1
+  "type_pin": "goal",
+  "parent_goal_id": null,
+  "schema_version": 2
 }
 ```
 
@@ -60,6 +62,15 @@ Rules:
 - `capture_id` is a UUID4 generated only for genuinely new evidence.
 - UUID4 capture identifiers are stable handles, not chronological sort keys.
 - `content_hash` is computed over the raw bytes only, not the metadata.
+- `type_pin` is `null`, `"goal"`, or `"project"` — the human's planning intent from `metis capture --as`,
+  recorded here before any model call so classification can never invent it (ADR-021). `parent_goal_id` is
+  set only for a project and names the goal it belongs to.
+- The pin is part of the evidence, not a later annotation: replaying identical text under a different pin is
+  refused as `pin_conflict` rather than rewriting the original. Because evidence is immutable, text captured
+  unpinned cannot be re-pinned — capture it again as the type you meant.
+- `schema_version` is `2` from the ADR-021 pin fields onward. The store accepts exactly these ten keys and
+  only version 2; version 1 evidence, which predates the pin, fails closed rather than being upgraded in
+  place — evidence is never rewritten.
 
 ### 1.2 Classification response evidence
 
@@ -271,38 +282,58 @@ Legal transitions only. Any other jump is rejected by the orchestrator and recor
 
 ### 4.1 Goal
 
+Created through `metis capture --as goal` → classify → propose → approve → `metis file` (ADR-021). Filed under
+`vault/goals/` with a deterministic id `goal.<title-slug>-<8 hex of capture_id>`. Planning `status` defaults to
+`active` at file time; the approval decision lives in SQLite + audit, not in this field.
+
 ```yaml
 ---
-id: goal.health-baseline
+id: goal.health-baseline-8f14e45f
 type: goal
 title: Establish a health baseline
 status: active          # active · achieved · abandoned
-horizon: annual         # long-term · annual · quarterly
+horizon: annual         # long-term · annual · quarterly  (system default: annual)
 created: 2026-07-28
+capture_id: 8f14e45f-ea3c-4f7a-9f2d-6c8b5a1d3e70
+evidence:
+  capture: evidence/8f14e45f-ea3c-4f7a-9f2d-6c8b5a1d3e70/raw.txt
+links: []               # empty is allowed — a goal has nothing above it
 ---
 ```
 
 ### 4.2 Project
 
-Per ADR-013 — one entity, runtime is an optional property.
+Per ADR-013 — one entity, runtime is an optional property. Created through
+`metis capture --as project --goal <goal-id>` (ADR-021). Filed under `vault/projects/` as
+`proj.<title-slug>-<8 hex of capture_id>`. The parent is system-written as `goal: "[[…]]"` from the capture pin
+(not human-editable under ADR-020) and must resolve to an existing note in `vault/goals/` at file time.
 
 ```yaml
 ---
-id: proj.metis-core
+id: proj.metis-core-8f14e45f
 type: project
 title: Metis core loop
 status: active          # active · paused · completed · archived
-goal: "[[goal.personal-systems]]"
+goal: "[[goal.personal-systems-aaaaaaaa]]"
 created: 2026-07-28
+capture_id: 8f14e45f-ea3c-4f7a-9f2d-6c8b5a1d3e70
+evidence:
+  capture: evidence/8f14e45f-ea3c-4f7a-9f2d-6c8b5a1d3e70/raw.txt
+links: []               # parent lives in `goal:`; links may stay empty
 runtime: none           # none · docker   (ADR-011)
 runtime_ref: null       # path to container definition when runtime is docker
 ---
 ```
 
 Most projects carry `runtime: none`. The property exists from day one so that adding containers later is a
-value change, not a schema migration.
+value change, not a schema migration. Runtime fields remain optional on Metis-filed projects until a later
+slice writes them.
 
 ### 4.3 Typed note — what an approved capture becomes
+
+Plain `metis capture` (no `--as`) still produces typed notes under `vault/notes/filed/` (ADR-021 leaves this
+path unchanged). Drafts for every type — including pinned goals and projects — still land in
+`vault/notes/proposed/` so Obsidian remains one approval inbox.
 
 ```yaml
 ---
@@ -318,7 +349,7 @@ evidence: evidence/8f14e45f-ea3c-4f7a-9f2d-6c8b5a1d3e70/raw.txt
 confidence: 0.82
 sensitivity: normal
 links:
-  - "[[proj.metis-core]]"
+  - "[[proj.metis-core-8f14e45f]]"
 ---
 ```
 
@@ -327,17 +358,23 @@ Rules:
 - A draft has exactly **two** human-editable fields, `status` and `links` (ADR-020). Everything else is
   written by the system and is byte-exact; the draft store refuses a draft that differs anywhere else.
 - `status` is the only field that **authorizes** a change (ADR-005). `links` supplies content and authorizes
-  nothing, so there is still exactly one approval surface.
+  nothing, so there is still exactly one approval surface. On a filed goal or project the planning `status`
+  is `active` (not `approved`); the authorizing decision remains the draft flip recorded in SQLite.
 - `links` is either `links: []` or `links:` followed by one or more `  - "[[target]]"` lines. Targets are
-  restricted to `[A-Za-z0-9._-]+`, must be unique, and are typed by the human — Metis does not create goal or
-  project notes and never proposes a link.
-- `capture_id` and `evidence` are mandatory — a note without provenance is invalid (REQ-VLT-004).
+  restricted to `[A-Za-z0-9._-]+`, must be unique, and are typed by the human — Metis never proposes a link.
+  Goals and projects are created through pinned capture (ADR-021), not by inventing a link target.
+- Link rules by effective type (ADR-021): a **typed note** needs ≥1 resolvable link; a **goal** may file with
+  `links: []`; a **project** names its parent in system-written `goal:` and may use `links: []`.
+- `capture_id` and `evidence` are mandatory on typed notes, goals, and projects — a note without provenance
+  is invalid (REQ-VLT-004).
 - `verification` is separate from `status`. Approving that a note should exist is not the same as verifying
   its content is true (REQ-DATA-005).
-- `links` must resolve to existing notes — matched against the `id` field of a note in `vault/goals/` or
-  `vault/projects/`, not against its filename. An unresolvable link, or none at all, blocks the commit rather
+- Every present link must resolve to an existing note — matched against the `id` field of a note in
+  `vault/goals/` or `vault/projects/`, not against its filename. An unresolvable link blocks the commit rather
   than creating an orphan (REQ-INTK-004). It does not invalidate the approval: correct the link and re-run
   `metis file`.
+- Filing routes by effective type: `goal` → `vault/goals/`, `project` → `vault/projects/`, other →
+  `vault/notes/filed/` (ADR-021).
 - `approved` holds the timestamp at which the human's decision was *detected*, not the moment of filing, so
   the filed bytes are a deterministic function of the approval. The filing time lives in
   `approval.committed_at`.
@@ -346,16 +383,17 @@ Rules:
 
 ```text
 vault/
-├── goals/
-├── projects/
+├── goals/            # permanent Goal notes (filed via ADR-021)
+├── projects/         # permanent Project notes (filed via ADR-021)
 ├── notes/
-│   ├── proposed/     # drafts awaiting your decision
-│   └── filed/        # approved, permanent
+│   ├── proposed/     # drafts awaiting your decision (all types)
+│   └── filed/        # approved typed notes
 └── archive/
 ```
 
 Drafts live in a separate directory so that "everything in `filed/` is approved" is structurally true, not a
-convention to remember.
+convention to remember. Goals and projects are permanent outside `notes/filed/` because their planning
+`status` vocabulary is not the approval field.
 
 ---
 

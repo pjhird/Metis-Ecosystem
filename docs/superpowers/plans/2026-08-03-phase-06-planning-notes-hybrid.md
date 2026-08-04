@@ -86,11 +86,11 @@
 
 **Produces:** Files under `vault/goals/` / `vault/projects/`; provenance required; goal empty links OK; project parent must resolve; replay one note
 
-- [ ] **Step 1:** Write failing acceptance tests from design §9
-- [ ] **Step 2:** Run — fail
-- [ ] **Step 3:** Implement destination routing, id allocation (`goal.` / `proj.` + stable unique suffix from capture_id), validation, audit detail fields if needed
-- [ ] **Step 4:** Full suite `python3 -m unittest discover -s tests -v`
-- [ ] **Step 5:** Commit
+- [x] **Step 1:** Write failing acceptance tests from design §9
+- [x] **Step 2:** Run — fail
+- [x] **Step 3:** Implement destination routing, id allocation (`goal.` / `proj.` + stable unique suffix from capture_id), validation, audit detail fields if needed
+- [x] **Step 4:** Full suite `python3 -m unittest discover -s tests -v`
+- [x] **Step 5:** Commit
 
 ### Task 5: Docs and ledger
 
@@ -98,7 +98,7 @@
 - Modify: `METIS-SCHEMAS.md`, `AGENTS.md`, `METIS-REQUIREMENT-LEDGER.md`
 - Add: design spec if not yet on branch (`docs/superpowers/specs/2026-08-03-phase-06-planning-notes-hybrid-design.md`)
 
-- [ ] **Step 1:** Amend schemas §4.1–4.3 for provenance + creation path; AGENTS commands + current phase; ledger rows with test names
+- [x] **Step 1:** Amend schemas §4.1–4.3 for provenance + creation path; AGENTS commands + current phase; ledger rows with test names
 - [ ] **Step 2:** Commit
 - [ ] **Step 3:** On owner go-ahead: push `step/08-planning-notes`, open draft PR against `main`
 

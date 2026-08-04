@@ -10,7 +10,7 @@ This file governs all work in this repository, whatever tool is driving.
 
 - `METIS-MASTER-PROMPT.md` — the governing product source
 - `METIS-EXECUTION-BLUEPRINT.md` — execution strategy and phased roadmap
-- `METIS-DECISIONS.md` — architecture decisions (ADR-001 … ADR-018). **Binding.**
+- `METIS-DECISIONS.md` — architecture decisions (ADR-001 … ADR-021). **Binding.**
 - `METIS-SCHEMAS.md` — the information and state model
 - `METIS-REQUIREMENT-LEDGER.md` — what is required, what is missing, what is deferred
 
@@ -20,10 +20,14 @@ If this file and the master prompt appear to conflict, stop and ask. Do not harm
 
 ## Current phase
 
-Building the MVP loop: **capture → classify → propose → approve → file → link → audit**, as a single local
-process. One input type (typed CLI capture). No containers. No external integrations. No agents.
+MVP loop (build-order steps 1–7) is complete and tagged through `step-07-audit-verified`.
 
-The MVP is complete only when this passes end to end:
+Now building **Phase 6 slice A — planning notes (hybrid)**: `metis capture --as goal|project` pins planning
+intent before any model call, then the same propose → approve → file → audit loop files the note under
+`vault/goals/` or `vault/projects/` with provenance (ADR-021). No containers. No external integrations. No
+agents. No outcomes/tasks.
+
+MVP acceptance (still the floor for every change):
 
 > A typed idea is preserved immutably, classified with visible confidence, turned into a schema-valid
 > proposal, surfaced in Obsidian as a draft with `status: proposed`, and — only after a human changes that to
@@ -158,31 +162,35 @@ No capability ships without these. They are the reason this system can be truste
 
 Do not skip ahead. Each step ships with its tests before the next begins.
 
-1. Repository skeleton, data-access layer, schema migrations, test harness
-2. Capture — evidence store, hashing, capture ID, replay protection
-3. Classify — model adapter, prompt versioning, confidence, raw-response preservation
-4. Propose — proposal record, draft note written to `vault/notes/proposed/`
-5. Approve — the approval command reads status, records the decision
-6. File — note committed to `vault/notes/filed/` with provenance and links
-7. Audit — every transition emits an event; end-to-end acceptance test
+1. Repository skeleton, data-access layer, schema migrations, test harness — done
+2. Capture — evidence store, hashing, capture ID, replay protection — done
+3. Classify — model adapter, prompt versioning, confidence, raw-response preservation — done
+4. Propose — proposal record, draft note written to `vault/notes/proposed/` — done
+5. Approve — the approval command reads status, records the decision — done
+6. File — note committed to `vault/notes/filed/` with provenance and links — done
+7. Audit — every transition emits an event; end-to-end acceptance test — done
+8. Planning notes — `capture --as goal|project`, type-aware filing to `vault/goals/` / `vault/projects/` (ADR-021)
 
 ## Do not build yet
 
 Containers · Postgres · OpenWebUI or any second interface · MCP or external integrations · runtime agents ·
-agent or skill registries · vector or graph databases · a background file-watcher · autonomous anything.
+agent or skill registries · vector or graph databases · a background file-watcher · autonomous anything ·
+outcomes, tasks, dependencies, or decompose-project.
 
 Each is deferred by a recorded decision with a stated trigger. If you believe a trigger has fired, say so and
 stop — do not build it.
 
 ## Commands
 
-To be filled in as they are created. Keep this section accurate; it is the first thing a new session reads.
+Keep this section accurate; it is the first thing a new session reads.
 
 ```
-metis capture "<text>"     # immutable typed capture with exact replay protection
-metis classify <capture_id> # classify one preserved capture through the configured model adapter
-metis propose "<capture-id>" # create or resume one proposal and proposed Obsidian draft
-metis approvals            # read the vault status field and record each human decision
-metis file <capture-id>    # file one approved note with provenance and resolved links
-metis status               # not yet implemented
+metis capture "<text>"                              # immutable typed capture with exact replay protection
+metis capture --as goal "<text>"                    # pin a Goal; files under vault/goals/ after approval
+metis capture --as project --goal <goal-id> "<text>" # pin a Project; parent must resolve at file time
+metis classify <capture_id>                         # classify one preserved capture (pin overrides type)
+metis propose "<capture-id>"                        # create or resume one proposal and proposed Obsidian draft
+metis approvals                                     # read the vault status field and record each human decision
+metis file <capture-id>                             # file one approved note (typed / goal / project by type)
+metis status                                        # not yet implemented
 ```

@@ -97,7 +97,7 @@ class RepositorySkeletonTests(unittest.TestCase):
             },
         )
 
-    def test_step_seven_governed_documentation_is_current(self) -> None:
+    def test_phase_six_slice_a_governed_documentation_is_current(self) -> None:
         agents = (REPOSITORY_ROOT / "AGENTS.md").read_text(encoding="utf-8")
         schemas = (REPOSITORY_ROOT / "METIS-SCHEMAS.md").read_text(encoding="utf-8")
         ledger = (REPOSITORY_ROOT / "METIS-REQUIREMENT-LEDGER.md").read_text(
@@ -106,15 +106,26 @@ class RepositorySkeletonTests(unittest.TestCase):
 
         self.assertIn('metis propose "<capture-id>"', agents)
         self.assertNotIn("metis approvals            # not yet implemented", agents)
+        self.assertIn("metis file <capture-id>", agents)
+        self.assertIn('metis capture --as goal "<text>"', agents)
+        self.assertIn(
+            'metis capture --as project --goal <goal-id> "<text>"', agents
+        )
+        self.assertIn("Phase 6 slice A", agents)
+        self.assertIn("ADR-021", agents)
         self.assertIn("migration `003_proposal_reservation.sql`", schemas)
         self.assertIn("### 2.4 `proposal_reservation`", schemas)
         self.assertIn("`004_unique_approval_proposal.sql`", schemas)
-        self.assertIn("metis file <capture-id>", agents)
         self.assertIn("`005_audit_event_append_only.sql`", schemas)
-        self.assertIn("build-order step 7", ledger)
+        self.assertIn("vault/goals/", schemas)
+        self.assertIn("vault/projects/", schemas)
+        self.assertNotIn("Metis does not create goal or", schemas)
+        self.assertIn("Phase 6 slice A", ledger)
+        self.assertIn("ADR-021", ledger)
         for requirement, expected in (
             ("REQ-GOV-003", "| Verified |"),
             ("REQ-GOV-004", "| Verified |"),
+            ("REQ-VLT-002", "| Verified |"),
             ("REQ-VLT-003", "| Verified |"),
             ("REQ-GOV-001", "| Verified |"),
             ("REQ-INTK-002", "| Verified |"),
