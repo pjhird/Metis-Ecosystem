@@ -167,16 +167,13 @@ class ClaudeModelAdapterTests(unittest.TestCase):
             {
                 "type": "object",
                 "properties": {
-                    "title": {"type": "string", "minLength": 1, "maxLength": 160},
-                    "body": {"type": "string", "minLength": 1},
-                    "reason": {"type": "string", "minLength": 1, "maxLength": 1000},
+                    "title": {"type": "string"},
+                    "body": {"type": "string"},
+                    "reason": {"type": "string"},
                     "uncertainties": {
                         "type": "array",
-                        "maxItems": 10,
                         "items": {
                             "type": "string",
-                            "minLength": 1,
-                            "maxLength": 500,
                         },
                     },
                 },
@@ -223,8 +220,6 @@ class ClaudeModelAdapterTests(unittest.TestCase):
                     },
                     "confidence": {
                         "type": "number",
-                        "minimum": 0.0,
-                        "maximum": 1.0,
                     },
                 },
                 "required": ["candidate_type", "sensitivity", "confidence"],
