@@ -27,7 +27,7 @@ the pin, and `metis file` routes approved goals and projects to `vault/goals/` /
 provenance. A requirement moves to Verified only when a named test run or observed behavior proves it — never
 because a document mentions it.
 
-Last reviewed: 2026-08-03 · Repository state at review: Phase 6 slice A on `step/08-planning-notes`
+Last reviewed: 2026-08-04 · Repository state at review: `main` through `step-08-planning-notes-verified` (Phase 6 slice A done; slice B not started). Outstanding Partial: `secret_never_appears_in_logs_or_notes` (REQ-SEC-002 / REQ-TEST-001).
 
 ---
 
