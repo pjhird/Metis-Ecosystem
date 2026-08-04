@@ -266,7 +266,7 @@ DROP TABLE intake_carry;
 
 - [ ] **Step 4: Extend the record and the store**
 
-In `metis/data_access/contracts.py`, add the two fields to `IntakeRecord` with no defaults (every construction site must be explicit) and declare the two new protocol methods:
+In `metis/data_access/contracts.py`, two separate edits. **First**, add the two fields to the `IntakeRecord` dataclass with no defaults, so every construction site must be explicit:
 
 ```python
 @dataclass(frozen=True)
@@ -284,7 +284,13 @@ class IntakeRecord:
     parent_id: str
 ```
 
+**Second**, and in a different class — the `StateStore` protocol, further down the same file, where `find_intake_by_capture_id` already lives — declare the two lookups. These are store methods, not record methods; putting them on the dataclass would make `self._state_store.find_intake_by_pin_key(...)` in Task 4 fail at runtime:
+
 ```python
+@runtime_checkable
+class StateStore(Protocol):
+    # ... existing members, including find_intake_by_capture_id ...
+
     def find_intake_by_pin_key(
         self,
         content_hash: str,
@@ -500,7 +506,10 @@ def test_conflicting_pin_on_identical_text_is_refused(self) -> None:
     self.assertIs(second.status, CaptureStatus.REFUSED)
     self.assertEqual(second.reason, "pin_conflict")
 
-def test_duplicate_plain_capture_still_creates_one_note(self) -> None:
+def test_duplicate_plain_capture_still_creates_one_capture(self) -> None:
+    """The capture half of the NULL-hazard regression. The filed half is the
+    pre-existing end-to-end `test_duplicate_replay_creates_one_note`, which
+    must stay green — do not rename or replace it."""
     first = self._capture(TEXT)
     second = self._capture(TEXT)
 
@@ -527,7 +536,8 @@ def test_a_legacy_unprojected_planning_row_fails_closed(self) -> None:
     """A pre-ADR-022 row carries the sentinel while its evidence records a pin.
 
     The migration reads *.sql only and cannot open evidence, so this state is
-    reachable on any store that predates ADR-022. It must refuse, not resolve.
+    reachable on any store that predates ADR-022. It carries its own reason so
+    an operator can tell a migration artifact from tampering.
     """
     first = self._capture(TEXT, type_pin="goal")
     self._corrupt_intake_pin(first.capture_id, type_pin="", parent_id="")
@@ -535,7 +545,7 @@ def test_a_legacy_unprojected_planning_row_fails_closed(self) -> None:
     replay = self._capture(TEXT, type_pin="goal")
 
     self.assertIs(replay.status, CaptureStatus.FAILED)
-    self.assertEqual(replay.reason, "state_evidence_mismatch")
+    self.assertEqual(replay.reason, "intake_pin_unprojected")
     self.assertEqual(replay.capture_id, first.capture_id)
 ```
 
@@ -621,6 +631,29 @@ and `_row_matches_evidence` gains the projection comparison, which is what makes
             and row.parent_id == (evidence.parent_id or "")
 ```
 
+The two divergences carry different reason codes (ADR-022 clause 9), so add one predicate beside it and use it where `state_evidence_mismatch` is returned:
+
+```python
+    @staticmethod
+    def _pin_is_unprojected(row: IntakeRecord, evidence: EvidenceRecord) -> bool:
+        """A pre-ADR-022 row the migration could not project, not tampering."""
+        return (
+            row.type_pin == ""
+            and row.parent_id == ""
+            and (evidence.type_pin is not None or evidence.parent_id is not None)
+        )
+```
+
+```python
+            reason = (
+                "intake_pin_unprojected"
+                if self._pin_is_unprojected(row, evidence)
+                else "state_evidence_mismatch"
+            )
+```
+
+Both remain `CaptureStatus.FAILED` and write nothing; only the reason and the operator's next move differ.
+
 - [ ] **Step 4: Run the tests to verify they pass**
 
 ```bash
@@ -637,7 +670,8 @@ git commit -m "feat(capture): decide replay and conflict on the composite pin ke
 
 Requirement: REQ-INTK-002
 Decision: ADR-022
-Test: test_same_text_under_two_projects_creates_two_captures"
+Test: test_same_text_under_two_projects_creates_two_captures
+Test: test_a_legacy_unprojected_planning_row_fails_closed"
 ```
 
 ---
@@ -878,8 +912,8 @@ The planning field is chosen by the pin, not by `note_type`, because a typed not
 `PARENT_REQUIRED` is mirrored locally rather than imported from `metis/evidence.py`: the existing comment on `LINK_TARGET` records that persistence must not import the vault layer, and the reverse import would invert that seam. Keep the two definitions in step if the rule ever changes.
 
 ```python
-# ponytail: mirrors evidence.PARENT_REQUIRED; kept local so the vault layer and
-# the evidence layer stay independent. Keep the two in step.
+# Mirrors evidence.PARENT_REQUIRED; kept local so the vault layer and the
+# evidence layer stay independent. Keep the two in step.
 PARENT_REQUIRED = frozenset({"project", "task"})
 
 
@@ -1043,15 +1077,23 @@ class PlanningTaskFiling(unittest.TestCase):
         self.assertEqual(len(list((self.vault / "tasks").iterdir())), 2)
 
     def test_status_edit_on_filed_task_is_inert(self) -> None:
+        """`approvals` scans notes/proposed/, so an empty decision list alone
+        would pass even if inertness were deleted. Assert that Metis neither
+        reads the edit nor repairs it: the bytes stay as the human left them and
+        no new audit event mentions this capture."""
         capture_id = self._approved_task(parent="proj.weekly-7d4e8eb8")
         self._run(["file", capture_id])
         note = self._only_file(self.vault / "tasks")
-        note.write_bytes(note.read_bytes().replace(b"status: open\n", b"status: done\n"))
+        edited = note.read_bytes().replace(b"status: open\n", b"status: done\n")
+        note.write_bytes(edited)
+        events_before = self._audit_events(capture_id)
 
         result = self._run(["approvals"])
 
         self.assertEqual(result["decisions"], [])
         self.assertEqual(self._intake_state(capture_id), "filed")
+        self.assertEqual(note.read_bytes(), edited)
+        self.assertEqual(self._audit_events(capture_id), events_before)
 ```
 
 Build the helpers on the existing planning-notes test harness in `tests/test_planning_notes.py`; `_approved_task` files a parent project first unless `file_parent=False`.
@@ -1115,9 +1157,11 @@ Resolving only against `("projects",)` is what makes `test_a_task_may_not_name_a
 
 Update the two `render_*` call sites to pass `type_pin=source.type_pin, parent_id=source.parent_id`, update `_commit` to select the store with `self._planning_stores.get(source.type_pin or "", self._filed_store)`, and add the three fields to the filing audit detail:
 
+Source `effective_type` from the pin, not from `note_type`. `classification.py:344` already applies `effective_type()` before persisting, so `proposal.note_type` carries the same value today — but clause 11 names the pin as the single routing input, and reading `note_type` here would leave a second input that a later change could silently diverge:
+
 ```python
             detail={
-                "effective_type": proposal.note_type,
+                "effective_type": source.type_pin or proposal.note_type,
                 "type_pin": source.type_pin or "",
                 "parent_id": source.parent_id or "",
                 "filed_path": filed_path,
@@ -1207,13 +1251,17 @@ Test: test_agents_documents_the_task_capture_command"
 
 ## Legacy rows in the owner's smoke store
 
-After migration 007, the three rows in `~/metis-smoke/state/metis.db` carry `type_pin = ''` and `parent_id = ''`. Two of them have evidence recording a pin — the goal `7d1200d2…` and the project `7d4e8eb8…` — so those rows diverge from their evidence by construction. Nothing filed is affected: filing reads the pin from evidence, and both notes are already in the vault. Only a replay of that exact text would touch them, and it fails closed as `state_evidence_mismatch`.
+After migration 007, the three rows in `~/metis-smoke/state/metis.db` carry `type_pin = ''` and `parent_id = ''`. Two of them have evidence recording a pin — the goal `7d1200d2…` and the project `7d4e8eb8…` — so those rows diverge from their evidence by construction. Nothing filed is affected: filing reads the pin from evidence, and both notes are already in the vault. Only a replay of that exact text would touch them, and it fails closed as `intake_pin_unprojected` — the reason reserved for this migration artifact, distinct from `state_evidence_mismatch`, which means tampering.
 
 If the owner wants replay to keep working on those two captures, the repair is two statements, run once, with Metis not running:
 
 ```sql
+-- The goal keeps parent_id = '' : a goal has nothing above it, so the sentinel
+-- is its correct projected value, and only type_pin was left unprojected.
 UPDATE intake SET type_pin = 'goal'
  WHERE capture_id = '7d1200d2-5ff9-415e-a4ae-9a6f91a3723f';
+
+-- The project needs both columns; read the parent from its evidence meta.
 UPDATE intake SET type_pin = 'project', parent_id = '<the goal id in that capture''s meta.json>'
  WHERE capture_id = '7d4e8eb8-32fd-459e-aa60-b91fdf2a371b';
 ```
@@ -1238,7 +1286,8 @@ Expect one note under `vault/tasks/` carrying `project: "[[proj.build-a-weekly-w
 
 ## Done when
 
-- Every test named in spec §9 exists and passes, including `duplicate_plain_capture_still_creates_one_note`, `intake_pin_columns_match_evidence_meta`, `v2_evidence_reads_its_parent_goal_as_parent_id`, and `a_legacy_unprojected_planning_row_fails_closed`.
+- Every test named in spec §9 exists and passes, including `duplicate_plain_capture_still_creates_one_capture`, `intake_pin_columns_match_evidence_meta`, `v2_evidence_reads_its_parent_goal_as_parent_id`, and `a_legacy_unprojected_planning_row_fails_closed`.
+- The pre-existing `duplicate_replay_creates_one_note` still passes unchanged — it is the filed half of the replay proof.
 - Full suite green on `step/09-planning-tasks`.
 - ADR-022 merged before any Task 2+ commit; every implementation commit carries `Decision: ADR-022`.
 - Ledger updated in the same PR as the tests that prove each row.

@@ -180,9 +180,28 @@ Must record:
 
     Putting the pin in a UNIQUE constraint promotes it from metadata to enforced state, so the ADR must bound what those columns are. The intake pin columns are a **derived projection** of the pin, written in the same transaction as the intake row; evidence meta remains the immutable record of what was captured (ADR-003). Divergence between the projection and evidence meta is a **fail-closed refusal**, never a silent preference for either side.
 
-    The projection's scope is deliberately narrow: it exists for the uniqueness constraint and for consistency checks. **Every behavioral read of the pin — routing, rendering, parent resolution — takes it from evidence, never from the projection.** A migration runner reads `*.sql` only and cannot open evidence, so rows captured before ADR-022 carry the sentinel even where their evidence records a pin. Those rows therefore diverge by construction, and a replay that touches one fails closed as `state_evidence_mismatch` rather than being read as a duplicate. Repairing a legacy row is a documented one-statement `UPDATE`, not a code path in this slice; no filed note is affected, because filing reads the pin from evidence.
+    The projection's scope is deliberately narrow: it exists for the uniqueness constraint and for consistency checks. **Every behavioral read of the pin — routing, rendering, parent resolution — takes it from evidence, never from the projection.** A migration runner reads `*.sql` only and cannot open evidence, so rows captured before ADR-022 carry the sentinel even where their evidence records a pin. Those rows therefore diverge by construction, and a replay that touches one fails closed rather than being read as a duplicate. Repairing a legacy row is a documented one-statement `UPDATE`, not a code path in this slice; no filed note is affected, because filing reads the pin from evidence.
+
+    **The two divergences carry different reason codes**, because they call for different human responses and an operator should not have to guess which one they are looking at:
+
+    | Row state versus evidence | Reason | Meaning |
+    |---|---|---|
+    | Both projection columns hold the sentinel while evidence records a pin | `intake_pin_unprojected` | A pre-ADR-022 row the migration could not project. Expected on any store that predates this ADR; repair with the documented `UPDATE`. |
+    | The projection holds a pin that differs from evidence | `state_evidence_mismatch` | Corruption or a hand edit. Nothing about the migration produces this; investigate before repairing. |
+
+    Both refuse and write nothing. Reusing one code for both would make the migration artifact indistinguishable from tampering.
 10. **Planning status is lifecycle, not authorization.** On a filed task, `status: open` is a lifecycle field. Obsidian edits to it are **inert** in this slice (Metis does not treat them as approval, rejection, or progress). Approval remains the draft `status` flip recorded in SQLite + audit (ADR-005 / ADR-020). CLI transitions of planning status are deferred to a later ADR.
-11. **Filing routes by the pin, not by the note type.** The vault stage is selected from `evidence.type_pin`: `goal` → `vault/goals/`, `project` → `vault/projects/`, `task` → `vault/tasks/`, no pin → `vault/notes/filed/`. This is the mechanical form of the §3.1 disambiguation, which otherwise exists only as prose: a classifier may legitimately return `candidate_type: task` for an ordinary note, so `note_type` cannot distinguish a typed task from a planning task and must not be the routing input. The same rule selects the parent contract — a `project` pin resolves its parent in `vault/goals/`, a `task` pin in `vault/projects/`.
+11. **Filing routes by the pin, not by the note type.** The vault stage is selected from `evidence.type_pin`: `goal` → `vault/goals/`, `project` → `vault/projects/`, `task` → `vault/tasks/`, no pin → `vault/notes/filed/`. This is the mechanical form of the §3.1 disambiguation, which otherwise exists only as prose: a classifier may legitimately return `candidate_type: task` for an ordinary note, so `note_type` cannot distinguish a typed task from a planning task and must not be the routing input. Audit detail for a filing takes `effective_type` from the same input.
+
+    The pin also selects the parent contract, which is three-way and total — every pin has a rule, and a pin with no rule is a refusal, not a default:
+
+    | Pin | Parent | Resolved against | Refusal reason |
+    |---|---|---|---|
+    | `goal` | none — a goal has nothing above it | — | a parent supplied with a goal pin is refused at capture (`pin_incomplete`) |
+    | `project` | required | `vault/goals/` | `filing.parent_goal_unresolvable` |
+    | `task` | required | `vault/projects/` | `filing.parent_project_unresolvable` |
+
+    Resolving a task's parent only against `vault/projects/` is what makes a goal id an unresolvable parent rather than a silently accepted one.
 
 **Migration detail (supports clause 9).** One migration adds `type_pin` and `parent_id` as `NOT NULL DEFAULT ''` and replaces `UNIQUE(content_hash)` with `UNIQUE(content_hash, type_pin, parent_id)`. Existing rows take the sentinel from the column default; no separate backfill statement is needed, and pre-existing planning captures keep their pin of record in evidence meta. New writes populate the projection from the pin in the intake transaction (clause 9).
 
@@ -207,10 +226,10 @@ Ship as **ADR-only PR** on `adr/022-planning-task-capture`, merge before `step/0
 - `status_edit_on_filed_task_is_inert` — proves §8 clause 10 (lifecycle edit does not authorize or transition intake)
 - `planning_task_and_typed_note_task_are_distinguishable` — proves §3.1 / §8 clause 6
 - `task_filing_emits_audit_with_effective_type_and_parent` — proves §1.7 audit detail (required fields)
-- `duplicate_plain_capture_still_creates_one_note` — regression: composite key must not break unpinned replay (NULL/sentinel hazard in §8 clause 9)
-- `intake_pin_columns_match_evidence_meta` — proves §8 clause 9: the projection is written in the intake transaction and divergence from evidence meta is refused, not preferred away
+- `duplicate_plain_capture_still_creates_one_capture` — regression: composite key must not break unpinned replay (NULL/sentinel hazard in §8 clause 9). It asserts one intake, not one note; the founding end-to-end `duplicate_replay_creates_one_note` already exists and must stay green as the filed half
+- `intake_pin_columns_match_evidence_meta` — proves §8 clause 9: the projection is written in the intake transaction and a projection that contradicts evidence is refused as `state_evidence_mismatch`, not preferred away
 - `v2_evidence_reads_its_parent_goal_as_parent_id` — proves the single read-time mapping site: immutable v2 meta (`parent_goal_id`) is read as `parent_id` without being rewritten (ADR-003)
-- `a_legacy_unprojected_planning_row_fails_closed` — proves §8 clause 9's migration consequence: a pre-ADR-022 row carrying the sentinel while its evidence records a pin is refused as `state_evidence_mismatch`, never read as a duplicate
+- `a_legacy_unprojected_planning_row_fails_closed` — proves §8 clause 9's migration consequence: a pre-ADR-022 row carrying the sentinel while its evidence records a pin is refused as `intake_pin_unprojected`, never read as a duplicate and never confused with tampering
 - Existing goal/project and step 5–7 suites stay green (update parent-differing replay tests to match §8 clause 9; keep founding `duplicate_replay_creates_one_note` green)
 
 These ten additions (and the verification-exemption line in §3) may land in the implementation PR as evidence. The uniqueness key, NULL/sentinel rule, projection-vs-evidence rule, pin-driven routing (clause 11), ADR header supersession line, and migration paragraph in §8 may not — they must be asserted by ADR-022 first.
