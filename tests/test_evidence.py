@@ -49,7 +49,9 @@ class EvidenceStoreTests(unittest.TestCase):
                 "source_detail": "metis capture",
                 "byte_size": len(RAW_BYTES),
                 "mime_type": "text/plain",
-                "schema_version": 1,
+                "type_pin": None,
+                "parent_goal_id": None,
+                "schema_version": 2,
             },
         )
 
@@ -237,7 +239,7 @@ class EvidenceStoreTests(unittest.TestCase):
             "source_type": "file-import",
             "source_detail": "not metis capture",
             "mime_type": "application/json",
-            "schema_version": 2,
+            "schema_version": 3,
         }
 
         for index, (key, value) in enumerate(invalid_values.items()):

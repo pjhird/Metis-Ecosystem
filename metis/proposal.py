@@ -13,7 +13,7 @@ from typing import Callable, Optional
 from uuid import UUID, uuid4
 
 from .audit import OUTCOMES, AuditTrail
-from .classification import ROUTING, parse_classification_response
+from .classification import ROUTING, effective_type, parse_classification_response
 from .classification_evidence import (
     ClassificationEvidenceError,
     ClassificationEvidenceStore,
@@ -148,8 +148,14 @@ def validated_prior_state(
         response = classification_store.validate_directory(
             runtime_root / Path(classification.raw_response_path).parent
         )
-        parsed = parse_classification_response(
+        candidate_type, sensitivity, confidence = parse_classification_response(
             response.raw_path.read_text(encoding="utf-8")
+        )
+        # The stored type is the pinned one, so re-derive it the same way (ADR-021).
+        parsed = (
+            effective_type(candidate_type, evidence),
+            sensitivity,
+            confidence,
         )
     except (
         ClassificationEvidenceError,
@@ -578,7 +584,9 @@ class ProposalService:
                 intake_state="proposing",
             )
         draft_path = f"vault/notes/proposed/note.{capture_id}.md"
-        expected_draft = render_proposed_draft(record, body_bytes)
+        expected_draft = render_proposed_draft(
+            record, body_bytes, parent_goal_id=evidence.parent_goal_id
+        )
         try:
             draft = self._draft_store.create(draft_path, expected_draft)
             self._draft_store.validate(draft.draft_path, expected_draft)

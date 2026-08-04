@@ -42,9 +42,20 @@ ROUTING = {
     "decision": "proposal:decision",
     "question": "proposal:question",
     "task": "proposal:task",
+    "goal": "proposal:goal",
+    "project": "proposal:project",
 }
+# The model proposes only these. Planning identity is the owner's intent, pinned
+# at capture, so `goal` and `project` are routable but never model-selectable
+# (ADR-021). Widening this set would let the classifier invent a goal.
+RESPONSE_TYPES = frozenset(ROUTING) - {"goal", "project"}
 SENSITIVITIES = {"normal", "sensitive"}
 RESPONSE_KEYS = {"candidate_type", "sensitivity", "confidence"}
+
+
+def effective_type(candidate_type: str, evidence: EvidenceRecord) -> str:
+    """The human's capture-time pin overrides the model's proposal (ADR-021)."""
+    return evidence.type_pin or candidate_type
 
 
 def parse_classification_response(raw_text: str) -> tuple[str, str, float]:
@@ -64,7 +75,7 @@ def parse_classification_response(raw_text: str) -> tuple[str, str, float]:
     candidate_type = payload["candidate_type"]
     sensitivity = payload["sensitivity"]
     confidence = payload["confidence"]
-    if not isinstance(candidate_type, str) or candidate_type not in ROUTING:
+    if not isinstance(candidate_type, str) or candidate_type not in RESPONSE_TYPES:
         raise ValueError("candidate type is invalid")
     if not isinstance(sensitivity, str) or sensitivity not in SENSITIVITIES:
         raise ValueError("sensitivity is invalid")
@@ -154,9 +165,10 @@ class ClassificationService:
         if existing is not None or intake.state == "classified":
             if existing is None or intake.state != "classified":
                 return self._consistency_failure(capture_id)
-            if self._validated_source(intake) is None:
+            source = self._validated_source(intake)
+            if source is None:
                 return self._consistency_failure(capture_id)
-            return self._replay(intake, existing)
+            return self._replay(intake, existing, source)
 
         if intake.state == "classifying":
             return self._result(
@@ -329,6 +341,7 @@ class ClassificationService:
                 "model_response_invalid",
                 raw_response_path=raw_response_path,
             )
+        candidate_type = effective_type(candidate_type, evidence)
         routing = ROUTING[candidate_type]
         record = ClassificationRecord(
             classification_id=classification_id,
@@ -379,6 +392,7 @@ class ClassificationService:
         self,
         intake,
         record: ClassificationRecord,
+        source: EvidenceRecord,
     ) -> ClassificationResult:
         expected_raw_path = (
             f"classification-evidence/{record.classification_id}/raw-response.txt"
@@ -409,6 +423,8 @@ class ClassificationService:
             candidate_type, sensitivity, confidence = parse_classification_response(
                 evidence.raw_path.read_text(encoding="utf-8")
             )
+            # The stored type is the pinned one, so re-derive it the same way.
+            candidate_type = effective_type(candidate_type, source)
         except (
             ClassificationEvidenceConsistencyError,
             OSError,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timedelta
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,8 +19,17 @@ METADATA_KEYS = {
     "source_detail",
     "byte_size",
     "mime_type",
+    "type_pin",
+    "parent_goal_id",
     "schema_version",
 }
+
+# The human's planning intent, pinned at capture and never chosen by a model (ADR-021).
+PIN_TYPES = frozenset({"goal", "project"})
+
+# ponytail: mirrors draft_notes.LINK_TARGET; kept local so persistence does not
+# import the vault layer. Keep the two in step if the id grammar ever changes.
+PARENT_GOAL_ID = re.compile(r"[A-Za-z0-9._-]+")
 
 
 @dataclass(frozen=True)
@@ -31,6 +41,8 @@ class EvidenceRecord:
     directory: Path
     raw_path: Path
     meta_path: Path
+    type_pin: Optional[str] = None
+    parent_goal_id: Optional[str] = None
 
 
 class EvidenceError(RuntimeError):
@@ -63,6 +75,8 @@ class EvidenceStore:
         raw_bytes: bytes,
         content_hash: str,
         captured_at: str,
+        type_pin: Optional[str] = None,
+        parent_goal_id: Optional[str] = None,
     ) -> EvidenceRecord:
         evidence_path = f"evidence/{capture_id}"
         directory = self._evidence_root / capture_id
@@ -76,7 +90,9 @@ class EvidenceStore:
             "source_detail": "metis capture",
             "byte_size": len(raw_bytes),
             "mime_type": "text/plain",
-            "schema_version": 1,
+            "type_pin": type_pin,
+            "parent_goal_id": parent_goal_id,
+            "schema_version": 2,
         }
 
         try:
@@ -118,6 +134,8 @@ class EvidenceStore:
             directory=directory,
             raw_path=raw_path,
             meta_path=meta_path,
+            type_pin=type_pin,
+            parent_goal_id=parent_goal_id,
         )
 
     def validate_directory(self, directory: Path) -> EvidenceRecord:
@@ -161,6 +179,8 @@ class EvidenceStore:
             directory=directory,
             raw_path=raw_path,
             meta_path=meta_path,
+            type_pin=metadata["type_pin"],
+            parent_goal_id=metadata["parent_goal_id"],
         )
 
     def find_by_content_hash(self, content_hash: str) -> Optional[EvidenceRecord]:
@@ -213,6 +233,8 @@ class EvidenceStore:
             if type(metadata[key]) is not expected_type:
                 raise ValueError(f"metadata {key} has an invalid type")
 
+        self._validate_pin(metadata["type_pin"], metadata["parent_goal_id"])
+
         timestamp = metadata["captured_at"]
         if not timestamp.endswith("Z"):
             raise ValueError("captured_at is not a UTC Z timestamp")
@@ -227,5 +249,19 @@ class EvidenceStore:
             raise ValueError("metadata source_detail is invalid")
         if metadata["mime_type"] != "text/plain":
             raise ValueError("metadata mime_type is invalid")
-        if metadata["schema_version"] != 1:
+        if metadata["schema_version"] != 2:
             raise ValueError("metadata schema_version is invalid")
+
+    @staticmethod
+    def _validate_pin(type_pin: object, parent_goal_id: object) -> None:
+        """A pin is either absent or a complete, well-formed planning intent."""
+        if type_pin is not None and type_pin not in PIN_TYPES:
+            raise ValueError("metadata type_pin is invalid")
+        if parent_goal_id is not None:
+            if type(parent_goal_id) is not str:
+                raise ValueError("metadata parent_goal_id has an invalid type")
+            if PARENT_GOAL_ID.fullmatch(parent_goal_id) is None:
+                raise ValueError("metadata parent_goal_id is invalid")
+        # A project names its parent goal; nothing else may carry one (ADR-021).
+        if (type_pin == "project") != (parent_goal_id is not None):
+            raise ValueError("metadata type_pin and parent_goal_id disagree")

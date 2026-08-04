@@ -22,6 +22,8 @@ from .data_access import (
     StateTransitionRefused,
 )
 from .draft_notes import (
+    PLANNING_STAGES,
+    STAGES,
     DraftNoteError,
     DraftNoteStore,
     DraftStatus,
@@ -29,7 +31,7 @@ from .draft_notes import (
     render_proposed_draft,
 )
 from .evidence import EvidenceStore
-from .identifiers import is_ulid
+from .identifiers import is_ulid, note_slug
 from .proposal import validated_prior_state
 from .proposal_content import ProposalContentError, ProposalContentStore
 from .proposal_evidence import ProposalEvidenceError, ProposalEvidenceStore
@@ -83,6 +85,12 @@ class FilingService:
         self._draft_store = draft_store
         self._filed_store = filed_store
         self._runtime_root = Path(runtime_root)
+        # A planning note leaves `vault/notes/` entirely (ADR-021), so its stage
+        # is derived from the pinned type rather than injected per command.
+        self._planning_stores = {
+            note_type: DraftNoteStore(self._runtime_root, stage=stage)
+            for note_type, stage in PLANNING_STAGES.items()
+        }
         self._clock = clock
         self._audit = AuditTrail(state_store, clock=clock)
 
@@ -141,8 +149,7 @@ class FilingService:
         prepared = self._prepared(intake, classification, proposal)
         if isinstance(prepared, FilingResult):
             return prepared
-        approval, filed_bytes, links = prepared
-        filed_path = f"vault/notes/filed/note.{capture_id}.md"
+        approval, filed_bytes, links, filed_path = prepared
         if intake.state == "filed":
             return self._replay(
                 intake,
@@ -198,17 +205,14 @@ class FilingService:
                 proposal_id=proposal.proposal_id,
                 intake_state=intake.state,
             )
-        if (
-            validated_prior_state(
-                self._evidence_store,
-                self._classification_store,
-                self._runtime_root,
-                intake,
-                classification,
-            )
-            is None
-            or not self._proposal_evidence_is_valid(proposal)
-        ):
+        source = validated_prior_state(
+            self._evidence_store,
+            self._classification_store,
+            self._runtime_root,
+            intake,
+            classification,
+        )
+        if source is None or not self._proposal_evidence_is_valid(proposal):
             return self._failed(
                 intake.capture_id,
                 "filing.evidence_chain_broken",
@@ -228,7 +232,9 @@ class FilingService:
         try:
             draft = self._draft_store.validate(
                 proposal.draft_note_path,
-                render_proposed_draft(proposal, body),
+                render_proposed_draft(
+                    proposal, body, parent_goal_id=source.parent_goal_id
+                ),
             )
         except DraftNoteError:
             return self._failed(
@@ -247,7 +253,9 @@ class FilingService:
                 intake_state=intake.state,
             )
         links = draft.observed_links
-        if not links:
+        # A goal has nothing above it, and a project names its parent in `goal:`,
+        # so only a typed note has to earn its place with a link (ADR-021).
+        if not links and proposal.note_type not in PLANNING_STAGES:
             return self._failed(
                 intake.capture_id,
                 "filing.links_absent",
@@ -265,13 +273,28 @@ class FilingService:
                 proposal_id=proposal.proposal_id,
                 intake_state=intake.state,
             )
+        if proposal.note_type == "project" and (
+            source.parent_goal_id is None
+            or self._unresolved((source.parent_goal_id,), ("goals",))
+        ):
+            return self._failed(
+                intake.capture_id,
+                "filing.parent_goal_unresolvable",
+                "no filed goal carries the ID "
+                f"{source.parent_goal_id}; file that goal, then run this again",
+                proposal_id=proposal.proposal_id,
+                intake_state=intake.state,
+            )
+        filed_path, note_id, status = self._destination(proposal)
         try:
             filed_bytes = render_note(
                 proposal,
                 body,
-                status=DraftStatus.APPROVED,
+                status=status,
                 links=links,
                 approved=approval.detected_at,
+                parent_goal_id=source.parent_goal_id,
+                note_id=note_id,
             )
         except DraftNoteError:
             return self._failed(
@@ -281,7 +304,18 @@ class FilingService:
                 proposal_id=proposal.proposal_id,
                 intake_state=intake.state,
             )
-        return approval, filed_bytes, links
+        return approval, filed_bytes, links, filed_path
+
+    def _destination(self, proposal: ProposalRecord) -> Tuple[str, str, str]:
+        """Route by effective type. The id is pure, so a replay recomputes it."""
+        stage = PLANNING_STAGES.get(proposal.note_type, "filed")
+        parts, prefix, status = STAGES[stage]
+        note_id = (
+            f"note.{proposal.capture_id}"
+            if stage == "filed"
+            else prefix + note_slug(proposal.title or "", proposal.capture_id)
+        )
+        return "/".join((*parts, f"{note_id}.md")), note_id, status
 
     def _commit(
         self,
@@ -292,8 +326,9 @@ class FilingService:
         filed_bytes: bytes,
         links: Tuple[str, ...],
     ) -> FilingResult:
+        store = self._planning_stores.get(proposal.note_type, self._filed_store)
         try:
-            self._filed_store.create(filed_path, filed_bytes)
+            store.create(filed_path, filed_bytes)
         except DraftNoteError:
             # A crash between the write and the transition leaves the note on
             # disk with the intake still approved. Resume only on the identical
@@ -413,10 +448,14 @@ class FilingService:
             message="this capture is already filed; no second note was written",
         )
 
-    def _unresolved(self, links: Tuple[str, ...]) -> Tuple[str, ...]:
+    def _unresolved(
+        self,
+        links: Tuple[str, ...],
+        directories: Tuple[str, ...] = LINK_SOURCE_DIRECTORIES,
+    ) -> Tuple[str, ...]:
         """Resolve each link against an existing note's `id` (ADR-020)."""
         resolvable = set()
-        for directory in LINK_SOURCE_DIRECTORIES:
+        for directory in directories:
             root = self._runtime_root / "vault" / directory
             try:
                 candidates = sorted(root.glob("*.md"))
