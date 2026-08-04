@@ -189,6 +189,8 @@ Expected: `TypeError` on the new keyword arguments, or `AttributeError: find_int
 
 `intake` currently declares `content_hash TEXT UNIQUE NOT NULL`. SQLite cannot drop a column-level UNIQUE, so the table is rebuilt using the same pattern migration 006 established (drop, recreate, refill — renaming a replacement table does not clear the deferred foreign-key counter).
 
+**This exact script was run against a copy of the smoke store on 2026-08-04, applied the way `_apply` applies it** (connection with `PRAGMA foreign_keys = ON`; `BEGIN IMMEDIATE` / script / `PRAGMA user_version = 7` / `COMMIT` in one `executescript`). Observed: `user_version` 6 → 7; counts unchanged on every table that references `intake` — `classification` 3, `proposal` 3, `approval` 3, `audit_event` 46 — and `intake` 3 in, 3 out; `PRAGMA foreign_key_check` clean; `PRAGMA integrity_check` `ok`. Dropping a table four others reference is safe here because `defer_foreign_keys` holds the violation until the refill `INSERT` clears it inside the same transaction, and `audit_event`'s append-only trigger from migration 005 does not fire. Two probes confirmed the constraint's behavior: re-inserting an existing hash with both sentinels raised `UNIQUE constraint failed: intake.content_hash, intake.type_pin, intake.parent_id`, and the same hash under a different parent inserted cleanly.
+
 ```sql
 -- ADR-022: the intake pin projection joins the uniqueness key.
 --
@@ -643,6 +645,8 @@ The two divergences carry different reason codes (ADR-022 clause 9), so add one 
             and (evidence.type_pin is not None or evidence.parent_id is not None)
         )
 ```
+
+Both columns must be empty. A half-projected row falls through to `state_evidence_mismatch` on purpose (ADR-022 clause 9): no migration or application path produces one, so the likeliest cause is a repair `UPDATE` run halfway, and that should be investigated rather than re-run.
 
 ```python
             reason = (
