@@ -62,6 +62,16 @@ Single test:
 
 The existing code calls the parent `parent_goal_id` in `evidence.py`, `capture.py`, `draft_notes.py`, and `filing.py`. A task's parent is a project, so the field becomes **`parent_id`** everywhere, with the pin type saying what kind of parent it is. Evidence already written under schema_version 2 is immutable and keeps its `parent_goal_id` key; the reader maps it to `parent_id`. Do not leave two live names in new code.
 
+**The name reaches seven production modules, not four.** `grep -rn parent_goal_id` on this branch also returns `metis/cli.py` (6), `metis/approval.py` (4), and `metis/proposal.py` (1). `approval.py:116-162` and `proposal.py:588` read `EvidenceRecord.parent_goal_id` and are owned by **no task** — they break the instant Task 3 renames the field, and `tests/test_approval.py` is green today, so leaving them raises the failure count. Task 3 owns them (see its Files list).
+
+**Repo-wide zero is not reachable until Task 8**, and Task 5 as written blocks it: its snippet keeps `capture_parser.add_argument("--goal", dest="parent_goal_id")`, which contradicts "do not leave two live names in new code". Open decision for Task 5 — rename the dest to `goal_id`, or record the CLI dest as the one documented exception. Not a Task 3 change. The check Task 3 can actually meet is scoped to one file:
+
+```bash
+grep -n parent_goal_id metis/evidence.py
+```
+
+which must return only the v2 key-set entry and the v2 read-time fallback, and nothing else.
+
 ### Routing rule (ADR-022 clause 11, not a plan decision)
 
 Filing chooses the vault stage from the **pin**, not from `proposal.note_type`. A classifier-typed note may legitimately be `type: task` and must still file to `vault/notes/filed/`; only a pinned capture is a planning task. Every routing site reads `evidence.type_pin`. Task 1 must land this as clause 11 before Task 8 implements it.
@@ -132,7 +142,8 @@ Decision: ADR-022"
 **Files:**
 - Create: `metis/data_access/migrations/007_intake_pin_projection.sql`
 - Modify: `metis/data_access/contracts.py`, `metis/data_access/sqlite.py`
-- Test: `tests/test_state_store.py` (extend), `tests/test_migrations.py` if present — otherwise add cases to the existing data-layer test module
+- Test: `tests/data_access/test_intake_store.py` (extend) — this is where the intake store's tests live; there is no `tests/test_state_store.py` and no top-level `tests/test_migrations.py`
+- Test (rename fallout, no new cases): `tests/data_access/test_classification_store.py`, `tests/data_access/test_proposal_store.py`, `tests/data_access/test_migrations.py` — each builds an `IntakeRecord` or stubs the store protocol, so all three must move in this task's commit or the data-layer suite goes red on the two new required fields
 
 **Interfaces:**
 - Produces: `IntakeRecord(capture_id, content_hash, captured_at, source_type, evidence_path, state, state_updated_at, failure_reason, trace_id, type_pin: str, parent_id: str)` — both new fields are `str`, never `None`, `''` when absent.
@@ -177,10 +188,24 @@ def test_pin_columns_reject_null(self) -> None:
 
 Where `intake_record` is the module's existing helper, extended with `type_pin: str = ""` and `parent_id: str = ""` keyword arguments and a distinct `capture_id` per call.
 
+The helper must **derive `evidence_path` and `trace_id` from the `capture_id` it was given**, not hold them as constants:
+
+```python
+def intake_record(**changes: object) -> IntakeRecord:
+    capture_id = str(changes.get("capture_id", CAPTURE_ID))
+    values = {
+        ...
+        "evidence_path": f"evidence/{capture_id}",
+        "trace_id": capture_id,
+    }
+```
+
+Two rows now legitimately share a content hash, so `test_identical_text_under_two_parents_registers_two_rows` inserts two rows that differ only by `capture_id` and `parent_id`. With a constant `evidence_path`, both rows would claim the same evidence directory — a state the store should never hold, and one that would make the fixture prove less than the test name claims.
+
 - [ ] **Step 2: Run the tests to verify they fail**
 
 ```bash
-/opt/miniconda3/bin/python3 -m unittest tests.test_state_store -v
+/opt/miniconda3/bin/python3 -m unittest discover -s tests/data_access -t . -v
 ```
 
 Expected: `TypeError` on the new keyword arguments, or `AttributeError: find_intakes_by_content_hash`.
@@ -347,7 +372,7 @@ In `metis/data_access/sqlite.py`, extend the intake column tuple (module constan
 - [ ] **Step 5: Run the tests to verify they pass**
 
 ```bash
-/opt/miniconda3/bin/python3 -m unittest tests.test_state_store -v
+/opt/miniconda3/bin/python3 -m unittest discover -s tests/data_access -t . -v
 ```
 
 Expected: PASS. Other suites will fail on the new required fields — Tasks 3–4 fix them.
@@ -355,7 +380,7 @@ Expected: PASS. Other suites will fail on the new required fields — Tasks 3–
 - [ ] **Step 6: Commit**
 
 ```bash
-git add metis/data_access tests/test_state_store.py
+git add metis/data_access tests/data_access
 git commit -m "feat(data): project the capture pin into the intake uniqueness key
 
 Requirement: REQ-INTK-002
@@ -369,7 +394,10 @@ Test: test_identical_text_under_two_parents_registers_two_rows"
 
 **Files:**
 - Modify: `metis/evidence.py`
+- Modify: `metis/approval.py:128`, `metis/proposal.py:588` — one attribute read each, `evidence.parent_goal_id` → `evidence.parent_id`. Owned by no other task; `tests/test_approval.py` is green today and breaks without them. The `parent_goal_id=` **keyword** these two pass to `render_proposed_draft` stays until Task 7 renames the parameter — only the attribute being read moves here.
 - Test: `tests/test_evidence.py`
+
+Deliberately **not** in this task: `capture.py:300` (Task 4) and `filing.py:236-296` (Task 8) also read the attribute, but both modules are already red on this branch — `capture.py` still calls the `find_intake_by_content_hash` Task 2 removed — so their readers move with their owning task.
 
 **Interfaces:**
 - Consumes: nothing from Task 2.
@@ -435,7 +463,9 @@ METADATA_KEYS_V2 = {..., "type_pin", "parent_goal_id", "schema_version"}
 METADATA_KEYS_V3 = {..., "type_pin", "parent_id", "schema_version"}
 ```
 
-`create()` writes `"parent_id": parent_id` and `"schema_version": 3`. `_validate_metadata` selects the key set and the parent key by `metadata["schema_version"]`, accepting 2 and 3 and rejecting anything else. `validate_directory` builds the record with `parent_id=metadata.get("parent_id", metadata.get("parent_goal_id"))`. `_validate_pin` becomes:
+`create()` writes `"parent_id": parent_id` and `"schema_version": 3`. `_validate_metadata` selects the key set and the parent key by the schema version, accepting 2 and 3 and rejecting anything else.
+
+**Read the version defensively, before the key-set comparison.** `validate_directory` catches `OSError, UnicodeError, JSONDecodeError, ValueError` (`metis/evidence.py:163-168`) — **not `KeyError`**. Today `set(metadata) != METADATA_KEYS` runs first, so a malformed `meta.json` raises `ValueError` and surfaces as `EvidenceConsistencyError`. Selecting the key set with `metadata["schema_version"]` inverts that order, so evidence missing the key would raise `KeyError` straight out of `validate_directory` — a crash where rule 3 requires a fail-closed refusal. Order it: `isinstance(metadata, dict)` → `metadata.get("schema_version")` → reject anything outside `{2, 3}` with `ValueError` → **then** compare the key set for that version. `validate_directory` builds the record with `parent_id=metadata.get("parent_id", metadata.get("parent_goal_id"))`. `_validate_pin` becomes:
 
 ```python
     @staticmethod
