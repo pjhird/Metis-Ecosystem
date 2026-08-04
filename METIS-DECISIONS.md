@@ -541,6 +541,106 @@ creation path — that is a new ADR, not a quiet widening of `--as`.
 
 ---
 
+## ADR-022 — Planning tasks are created through pinned capture under a project
+
+**Amends ADR-014** (extends the uniqueness key for all intakes). **Supersedes the parent-conflict behavior
+established in the ADR-021 implementation**, under which a differing parent produced `pin_conflict`.
+
+**Context.** ADR-021 gave goals and projects a governed creation path and left tasks explicitly out of scope.
+Blueprint Phase 6 needs the planning spine `goal → project → task` before review tooling has anything to
+review. A task is not an idea with a label: a classifier may legitimately return `candidate_type: task` for an
+ordinary note, so the planning entity needs its own identity, its own parent contract, and its own
+destination — without a second approval surface or a second pipeline.
+
+**Decision.** Extend the ADR-021 hybrid to tasks.
+
+1. `metis capture --as task --project <project-id> "<text>"` is the creation path for a planning task. `--as
+   task` requires `--project`; `--project` without `--as task` is a usage error that writes no evidence.
+2. The pin overrides the classifier. The parent is project-only and is written by the system as
+   `project: "[[…]]"`, not human-editable under ADR-020.
+3. Task notes carry provenance (`capture_id`, `evidence`) like every other approved note (REQ-VLT-004).
+4. A planning task may file with `links: []`; its parent is resolved at file time, not at capture time.
+5. Filing routes an approved pinned task to `vault/tasks/` as `task.<title-slug>-<8 hex of capture_id>`.
+6. A typed-note `candidate_type: task` is **not** a planning task. It remains an ordinary note in
+   `vault/notes/filed/` needing at least one resolvable link.
+7. This narrows ADR-021, which placed tasks out of scope.
+8. It authorizes nothing else: outcomes, dependencies, decompose-project, agents, MCP, and external task
+   managers remain deferred.
+9. **Intake uniqueness key.** The uniqueness key for **all** intakes is `content_hash + type_pin + parent_id`,
+   where `parent_id` is the typed parent pin — the empty-string sentinel for unpinned captures and for goals,
+   the goal id for projects, the project id for tasks. Identical text under two different parents is two
+   distinct captures, not a replay. `pin_conflict` is reserved for identical `content_hash + parent_id`
+   submitted under a differing `type_pin`. The constraint is a plain
+   `UNIQUE(content_hash, type_pin, parent_id)`.
+
+   `type_pin` and `parent_id` are `NOT NULL`; unpinned captures store the empty string in both. NULL is never
+   used in the uniqueness key, because SQLite treats NULLs as distinct and a nullable column would silently
+   disable replay protection for unpinned captures.
+
+   Sentinels are chosen over a `COALESCE` or generated column deliberately: a generated column moves the
+   semantics into an expression that no longer appears in the constraint a reader inspects. The sentinel keeps
+   the key legible where it is defined, `NOT NULL` makes the hazard structurally impossible rather than
+   handled, and a sentinel behaves identically across the ADR-002 seam, where Postgres `NULLS NOT DISTINCT` is
+   version-gated and differs from SQLite's default.
+
+   The projection's scope is narrow: it exists for the uniqueness constraint and for consistency checks. Every
+   behavioral read of the pin — routing, rendering, parent resolution — takes it from evidence, which remains
+   the immutable record (ADR-003). Divergence between the projection and evidence is a fail-closed refusal,
+   never a silent preference for either side, and the two divergences carry different reasons because they
+   call for different human responses:
+
+   | Row state versus evidence | Reason |
+   |---|---|
+   | Both projection columns hold the sentinel while evidence records a pin | `intake_pin_unprojected` — a pre-ADR-022 row the migration could not project; repair with a documented `UPDATE` |
+   | The projection holds a pin that differs from evidence | `state_evidence_mismatch` — corruption or a hand edit; investigate before repairing |
+   | The projection is populated in one column and sentinel in the other while evidence populates both | `state_evidence_mismatch` — deliberately classed as tampering, because no migration or application path produces a half-projected row |
+
+10. **Planning status is lifecycle, not authorization.** On a filed task, `status: open` is a lifecycle field.
+    Obsidian edits to it are inert in this slice. Approval remains the draft `status` flip recorded in SQLite
+    and the audit log (ADR-005, ADR-020). CLI transitions of planning status are deferred to a later ADR. This
+    slice emits `open` only; values no transition can produce are not declared.
+11. **Filing routes by the pin, not by the note type.** The vault stage is selected from `evidence.type_pin`:
+    `goal` → `vault/goals/`, `project` → `vault/projects/`, `task` → `vault/tasks/`, no pin →
+    `vault/notes/filed/`. Audit detail for a filing takes `effective_type` from the same input. This is the
+    mechanical form of clause 6, which would otherwise be prose. The pin also selects the parent contract,
+    which is total:
+
+    | Pin | Parent | Resolved against | Refusal |
+    |---|---|---|---|
+    | `goal` | none | — | a parent supplied with a goal pin is refused at capture (`pin_incomplete`) |
+    | `project` | required | `vault/goals/` | `filing.parent_goal_unresolvable` |
+    | `task` | required | `vault/projects/` | `filing.parent_project_unresolvable` |
+
+Planning entities are exempt from the `verification` field: it applies to interpreted content whose truth can
+be checked later (REQ-DATA-005), not to human-declared planning identity.
+
+**Migration.** `intake` has no pin columns today, so one migration adds `type_pin` and `parent_id` as
+`NOT NULL DEFAULT ''` and replaces `UNIQUE(content_hash)` with the composite key. There is no backfill
+statement: SQLite cannot drop a column-level `UNIQUE`, so the change is a drop/recreate/refill rebuild on the
+pattern migration 006 established, and existing rows take the sentinel through the refill `SELECT` rather than
+the declared default. No reindex or reconciliation is required — the previous constraint already permitted at
+most one row per `content_hash`. A migration runner reads `*.sql` only and cannot open evidence, so rows
+captured before this ADR keep the sentinel even where their evidence records a pin; those rows are refused as
+`intake_pin_unprojected` on replay and repaired by hand.
+
+**Alternatives.** Soft parents through human `links` (rejected: weaker than ADR-021, reintroduces orphans).
+A parent that may be a goal or a project (deferred: two legal trees blur project and task). Decompose-project
+first (deferred: multi-note proposals are a new authority shape). Promoting typed-note `task` as the planning
+entity (rejected: a label on an idea-shaped note). A nullable pin column (rejected: silently disables replay
+protection for unpinned captures).
+
+**Consequences.** The planning spine becomes usable end to end through the existing loop. Every intake row
+carries a pin projection, which makes uniqueness legible in the schema and makes divergence detectable. A
+dedicated `metis propose-task` pipeline is still not adopted; a thin alias may wrap `--as` later.
+
+**Reversal path.** Remove `--as task` and the `tasks` stage; filed task notes remain valid vault content. The
+composite key would need a further migration to reverse, which is why it is recorded here rather than assumed.
+
+**Revisit if.** Outcomes need a different creation path, tasks need a second parent kind, or planning status
+needs real transitions — each is a new ADR, not a quiet widening of `--as`.
+
+---
+
 ## Decision Summary
 
 | ID | Decision | Status |
@@ -566,6 +666,7 @@ creation path — that is a new ADR, not a quiet widening of `--as`.
 | ADR-019 | Git is the governance layer for code | Adopted |
 | ADR-020 | Draft `status` and `links` are human-editable | Adopted |
 | ADR-021 | Planning notes via pinned capture (`--as`) | Adopted |
+| ADR-022 | Planning tasks via pinned capture under a project | Adopted |
 
 Adopted means chosen and to be built. Deferred means chosen *not* to be built yet, with a stated trigger.
 Neither means implemented.
