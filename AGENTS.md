@@ -22,10 +22,13 @@ If this file and the master prompt appear to conflict, stop and ask. Do not harm
 
 MVP loop (build-order steps 1–7) is complete and tagged through `step-07-audit-verified`.
 
-Now building **Phase 6 slice A — planning notes (hybrid)**: `metis capture --as goal|project` pins planning
-intent before any model call, then the same propose → approve → file → audit loop files the note under
-`vault/goals/` or `vault/projects/` with provenance (ADR-021). No containers. No external integrations. No
-agents. No outcomes/tasks.
+**Phase 6 slice A — planning notes (hybrid)** is complete and tagged `step-08-planning-notes-verified`
+(ADR-021): `metis capture --as goal|project` pins planning intent before any model call; the same
+propose → approve → file → audit loop files under `vault/goals/` or `vault/projects/` with provenance.
+
+Next product work is **Phase 6 slice B** (outcomes, tasks, dependencies) — design before code. Prefer
+real vault use and a growing corpus before Phase 7 review tooling. No containers. No external
+integrations. No agents. No execution-spine code until an adopted ADR.
 
 MVP acceptance (still the floor for every change):
 
@@ -169,7 +172,8 @@ Do not skip ahead. Each step ships with its tests before the next begins.
 5. Approve — the approval command reads status, records the decision — done
 6. File — note committed to `vault/notes/filed/` with provenance and links — done
 7. Audit — every transition emits an event; end-to-end acceptance test — done
-8. Planning notes — `capture --as goal|project`, type-aware filing to `vault/goals/` / `vault/projects/` (ADR-021)
+8. Planning notes — `capture --as goal|project`, type-aware filing to `vault/goals/` / `vault/projects/` (ADR-021) — done
+9. Outcomes / tasks / dependencies — Phase 6 slice B; design before code — not started
 
 ## Do not build yet
 
