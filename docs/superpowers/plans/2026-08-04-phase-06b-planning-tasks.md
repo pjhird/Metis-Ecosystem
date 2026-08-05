@@ -23,6 +23,21 @@ Single test:
 /opt/miniconda3/bin/python3 -m unittest tests.test_planning_tasks.PlanningTaskFiling.test_a_pinned_task_files_under_vault_tasks_with_empty_links -v
 ```
 
+**Regression check between tasks.** The suite is red for most of this plan, so a
+raw pass/fail count hides a regression behind an equal-sized fix. Diff the set of
+failing **ids** across each change:
+
+```bash
+python -m unittest discover -s tests 2>&1 | grep -E "^(FAIL|ERROR):" | sed 's/^[A-Z]*: //' | sort > /tmp/before_fail.txt
+# ...make the change...
+comm -13 /tmp/before_fail.txt /tmp/after_fail.txt   # newly failing = the regression set; must be empty or explained
+```
+
+Do **not** diff passing names from `-v` output. `unittest -v` prints a documented
+test as its id line followed by `<docstring first line> ... ok`, so any test with
+a docstring is keyed on prose rather than identity, and two tests sharing a first
+line collapse into one. `FAIL:` / `ERROR:` lines always carry the full dotted id.
+
 ## Global Constraints
 
 - Never write permanent knowledge without a recorded human approval (ADR-004, ADR-005).
@@ -807,6 +822,9 @@ Test: test_project_flag_without_task_pin_writes_no_evidence"
 **Files:**
 - Modify: `metis/classification.py:39-58`
 - Test: `tests/test_classification.py` or `tests/test_planning_classify.py`
+- Test (fixture fallout, no new cases): `tests/test_proposal.py`, `tests/test_proposal_recovery.py` — with `tests/test_classification.py` these are the last three modules constructing `IntakeRecord` directly, and all three fail `IntakeRecord.__init__() missing 2 required positional arguments: 'type_pin' and 'parent_id'`. Add `type_pin=""` / `parent_id=""` to each fixture.
+
+**This task closes the Task 2 fixture fallout.** Task 2 gave `IntakeRecord` two required fields and named only the three data-layer files; these three top-level modules were missed and are owned by no other task. They account for **83 of the 116 failures** standing after Task 4 — `test_proposal` 25, `test_proposal_recovery` 30, `test_classification` 28 — and nothing in Tasks 5, 7, or 8 touches them. Without them **Task 9's "full suite green" gate is unreachable**, which is why they land here rather than in Task 5 (CLI flags, unrelated) or Task 9 (documentation). The remaining 33 are the `filing.py` / `draft_notes.py` rename owned by Tasks 7 and 8.
 
 **Interfaces:**
 - Consumes: `EvidenceRecord.type_pin` (Task 3).
@@ -855,15 +873,16 @@ RESPONSE_TYPES = frozenset(ROUTING) - {"goal", "project"}
 - [ ] **Step 4: Run the tests to verify they pass**
 
 ```bash
-/opt/miniconda3/bin/python3 -m unittest tests.test_classification -v
+/opt/miniconda3/bin/python3 -m unittest tests.test_classification tests.test_proposal tests.test_proposal_recovery -v
 ```
 
-Expected: PASS.
+Expected: PASS. The full suite should now sit at roughly 33 failures — only the
+`filing.py` / `draft_notes.py` rename remains, for Tasks 7 and 8.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add metis/classification.py tests/test_classification.py
+git add metis/classification.py tests/test_classification.py tests/test_proposal.py tests/test_proposal_recovery.py
 git commit -m "feat(classify): let a task pin override the model candidate type
 
 Requirement: REQ-INTK-003
