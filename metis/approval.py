@@ -113,19 +113,20 @@ class ApprovalService:
             message=None,
         )
 
-    def _parent_goal_id(self, intake: IntakeRecord) -> Optional[str]:
-        """Read the capture-time pin, the only place a project's parent lives.
+    def _pin(self, intake: IntakeRecord) -> Tuple[Optional[str], Optional[str]]:
+        """Read the capture-time pin, the only place a planning parent lives.
 
-        An unreadable pin returns `None`, which makes a project draft fail to
-        render and be reported as inconsistent rather than approved.
+        An unreadable pin returns `(None, None)`, which makes a project or task
+        draft fail to render and be reported as inconsistent rather than
+        approved.
         """
         try:
             evidence = self._evidence_store.validate_directory(
                 self._runtime_root / intake.evidence_path
             )
         except (EvidenceError, OSError, TypeError, ValueError):
-            return None
-        return evidence.parent_id
+            return None, None
+        return evidence.type_pin, evidence.parent_id
 
     def _review_one(self, intake: IntakeRecord) -> ApprovalResult:
         try:
@@ -154,12 +155,12 @@ class ApprovalService:
                 "approval_content_inconsistent",
                 "the canonical proposal content does not match its proposal",
             )
-        parent_goal_id = self._parent_goal_id(intake)
+        type_pin, parent_id = self._pin(intake)
         try:
             draft = self._draft_store.validate(
                 proposal.draft_note_path,
                 render_proposed_draft(
-                    proposal, body, parent_goal_id=parent_goal_id
+                    proposal, body, type_pin=type_pin, parent_id=parent_id
                 ),
             )
         except DraftNoteError:

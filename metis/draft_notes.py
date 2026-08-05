@@ -34,9 +34,18 @@ STAGES = {
     "filed": (("vault", "notes", "filed"), "note.", DraftStatus.APPROVED.value),
     "goals": (("vault", "goals"), "goal.", "active"),
     "projects": (("vault", "projects"), "proj.", "active"),
+    # A planning task enters its lifecycle at `open`; this slice produces no
+    # other value, and the field authorizes nothing (ADR-022 clause 10).
+    "tasks": (("vault", "tasks"), "task.", "open"),
 }
-PLANNING_STAGES = {"goal": "goals", "project": "projects"}
+PLANNING_STAGES = {"goal": "goals", "project": "projects", "task": "tasks"}
 CAPTURE_NAMED_STAGES = ("proposed", "filed")
+
+# ponytail: mirrors evidence.PARENT_REQUIRED; kept local so the vault layer and
+# the evidence layer stay independent, matching the reasoning already recorded
+# on evidence.PARENT_ID. Keep the two in step if the rule ever changes —
+# `test_the_mirrored_parent_rule_matches_evidence` is what catches the drift.
+PARENT_REQUIRED = frozenset({"project", "task"})
 
 
 @dataclass(frozen=True)
@@ -68,22 +77,29 @@ class DraftNoteWriteError(DraftNoteError):
     """Raised when a new draft cannot be finalized."""
 
 
-def _planning_field(note_type: str, parent_goal_id: Optional[str]) -> str:
+def _planning_field(type_pin: Optional[str], parent_id: Optional[str]) -> str:
     """The one frontmatter line a planning note adds, written by the system.
 
-    A goal's horizon is the ratified default; a project names its parent goal.
-    Neither is human-editable — ADR-020 still allows only `status` and `links`.
+    A goal's horizon is the ratified default; a project names its parent goal
+    and a task names its parent project. None is human-editable — ADR-020 still
+    allows only `status` and `links`.
+
+    The field is chosen by the capture-time pin, never by `proposal.note_type`:
+    a classifier may legitimately type a note `task`, and that is an ordinary
+    typed note rather than a planning task (ADR-022 clause 11).
     """
-    if (note_type == "project") != (parent_goal_id is not None):
+    if (type_pin in PARENT_REQUIRED) != (parent_id is not None):
         raise DraftNoteConsistencyError(
-            "a project note requires a parent goal, and only a project may carry one"
+            "a project or task note requires a parent, and only they may carry one"
         )
-    if note_type == "goal":
+    if parent_id is not None and LINK_TARGET.fullmatch(parent_id) is None:
+        raise DraftNoteConsistencyError("parent is not a valid note id")
+    if type_pin == "goal":
         return "horizon: annual\n"
-    if note_type == "project":
-        if LINK_TARGET.fullmatch(parent_goal_id) is None:
-            raise DraftNoteConsistencyError("parent goal is not a valid note id")
-        return f'goal: "[[{parent_goal_id}]]"\n'
+    if type_pin == "project":
+        return f'goal: "[[{parent_id}]]"\n'
+    if type_pin == "task":
+        return f'project: "[[{parent_id}]]"\n'
     return ""
 
 
@@ -91,9 +107,12 @@ def render_proposed_draft(
     proposal: ProposalRecord,
     canonical_body: bytes,
     *,
-    parent_goal_id: Optional[str] = None,
+    type_pin: Optional[str] = None,
+    parent_id: Optional[str] = None,
 ) -> bytes:
-    return render_note(proposal, canonical_body, parent_goal_id=parent_goal_id)
+    return render_note(
+        proposal, canonical_body, type_pin=type_pin, parent_id=parent_id
+    )
 
 
 def render_note(
@@ -103,7 +122,8 @@ def render_note(
     status: str = DraftStatus.PROPOSED.value,
     links: Tuple[str, ...] = (),
     approved: Optional[str] = None,
-    parent_goal_id: Optional[str] = None,
+    type_pin: Optional[str] = None,
+    parent_id: Optional[str] = None,
     note_id: Optional[str] = None,
 ) -> bytes:
     """Render one note. The proposed draft and the filed note share this."""
@@ -134,7 +154,10 @@ def render_note(
         if not links
         else "links:\n" + "".join(f'  - "[[{target}]]"\n' for target in links)
     )
-    planning_field = _planning_field(proposal.note_type, parent_goal_id)
+    planning_field = _planning_field(type_pin, parent_id)
+    # Planning identity is declared by a human, so REQ-DATA-005's field does not
+    # apply to it (spec §3); it belongs to interpreted content only.
+    verification_field = "" if type_pin else "verification: unverified\n"
     lines = (
         "---\n"
         f"id: {scalar(note_id or f'note.{proposal.capture_id}')}\n"
@@ -145,7 +168,7 @@ def render_note(
         f"title: {scalar(proposal.title)}\n"
         f"{planning_field}"
         f"status: {status}\n"
-        "verification: unverified\n"
+        f"{verification_field}"
         f"created: {scalar(proposal.created_at)}\n"
         f"approved: {'null' if approved is None else scalar(approved)}\n"
         f"confidence: {confidence}\n"
@@ -166,8 +189,8 @@ def render_note(
 class DraftNoteStore:
     """Exclusive storage for one vault note stage.
 
-    `proposed` holds drafts awaiting a decision; `filed`, `goals`, and
-    `projects` hold permanent notes. They share this store so the
+    `proposed` holds drafts awaiting a decision; `filed`, `goals`, `projects`,
+    and `tasks` hold permanent notes. They share this store so the
     exclusive-create, fsync, and read-back write path has exactly one
     implementation.
     """
