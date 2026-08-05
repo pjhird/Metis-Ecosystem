@@ -38,6 +38,41 @@ test as its id line followed by `<docstring first line> ... ok`, so any test wit
 a docstring is keyed on prose rather than identity, and two tests sharing a first
 line collapse into one. `FAIL:` / `ERROR:` lines always carry the full dotted id.
 
+**`comm -13` alone is not sufficient, and Task 6 proved why (2026-08-05).** Most of
+the inherited failures in this plan are *errors raised in `setUp`*, which means those
+test bodies have not executed since the change that broke them. The moment a task
+repairs the fixture, dozens of bodies run for the first time — and a test that flips
+`ERROR` → `FAIL` **keeps its dotted id**, stays in the after-set, and is reported by
+neither `comm -13` nor the failure count. This is live for Tasks 7 and 8: the 33
+remaining failures error in `test_filing`, `test_planning_notes`, `test_audit`, and
+`test_filing_integration`, and the `draft_notes.py` / `filing.py` rename unblocks them
+the same way. Assert **forward set equality** — name the expected removals, do not
+merely check for additions:
+
+```bash
+comm -23 /tmp/before_fail.txt /tmp/after_fail.txt   # removed: must be exactly the ids the task claims to fix
+comm -13 /tmp/before_fail.txt /tmp/after_fail.txt   # newly failing: must be empty
+wc -l < /tmp/after_fail.txt                         # remaining: an exact number, never "roughly"
+```
+
+An approximate target ("roughly N failures") is precisely where a masked failure hides.
+
+**Also diff the full collected id set**, which closes the other blind spot: a deleted
+or renamed passing test is invisible to any failing-set diff, so a removal can cancel
+against a fix and reconcile on count alone.
+
+```bash
+python -c "import unittest;ids=[]
+def walk(s):
+    [walk(t) if isinstance(t,unittest.TestSuite) else ids.append(t.id()) for t in s]
+walk(unittest.TestLoader().discover('tests'));print('\n'.join(sorted(ids)))" > /tmp/before_all.txt
+```
+
+`comm -23` on that pair lists every test **removed** and `comm -13` every test
+**added**, which is the evidence behind each commit's "tests added / removed / total
+delta" line. Unlike `-v` output this is keyed on the dotted id, so docstrings cannot
+collapse two tests into one.
+
 ## Global Constraints
 
 - Never write permanent knowledge without a recorded human approval (ADR-004, ADR-005).
@@ -901,30 +936,15 @@ Expected: PASS, and the full suite lands at **exactly 33** failures — `test_fi
 `test_planning_notes` 8, `test_audit` 4, `test_filing_integration` 3. Not "roughly": an
 approximate target is where a masked failure hides.
 
-**`comm -13` alone cannot prove this task.** All 83 failures error inside `setUp` /
-`_classified()`, so those test bodies have not executed since Task 2. The fixture edits
-run them for the first time, and a test that flips `ERROR` → `FAIL` keeps its dotted id,
-stays in the after-set, and is reported by nothing. Assert forward set equality instead:
+Use the forward set-equality check from **Regression check between tasks** above — this
+task is where that check was found to be necessary, and Tasks 7 and 8 inherit the same
+hazard. All 83 error inside `setUp` / `_classified()`, so their bodies had not executed
+since Task 2 and `comm -13` could not have caught an `ERROR` → `FAIL` flip among them.
 
-```bash
-comm -23 before_fail.txt after_fail.txt | wc -l   # removed: must be exactly 83
-comm -13 before_fail.txt after_fail.txt           # newly failing: must be empty
-wc -l < after_fail.txt                            # remaining: must be exactly 33
-```
-
-Diffing the full *collected* id set before and after closes the plan's other blind spot —
-a deleted passing test is invisible to a failing-set diff:
-
-```bash
-python -c "import unittest;ids=[]
-def walk(s):
-    [walk(t) if isinstance(t,unittest.TestSuite) else ids.append(t.id()) for t in s]
-walk(unittest.TestLoader().discover('tests'));print('\n'.join(sorted(ids)))" > all.txt
-```
-
-Result (2026-08-05): removed 83, newly failing 0, remaining 33, collected set identical
-at 459 before and after the fixture edits — no test added, removed, or renamed. All 83
-unblocked bodies passed on first execution.
+Result (2026-08-05): removed exactly 83, newly failing 0, remaining exactly 33, and the
+collected id set identical at 459 across the fixture edits — nothing added, removed, or
+renamed. All 83 unblocked bodies passed on first execution. Adding the two new cases
+then took the suite to 461 (2 added, 0 removed).
 
 - [x] **Step 5: Commit**
 
