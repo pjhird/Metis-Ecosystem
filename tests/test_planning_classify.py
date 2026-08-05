@@ -20,6 +20,7 @@ from metis.model_adapters import ModelResponse
 
 
 GOAL_ID = "goal.health-baseline"
+PROJECT_ID = "proj.weekly-7d4e8eb8"
 TEXT = "Establish a health baseline"
 
 
@@ -82,6 +83,15 @@ class PlanningClassificationTests(unittest.TestCase):
         self.assertEqual(result["candidate_type"], "project")
         self.assertEqual(result["routing"], "proposal:project")
 
+    def test_task_pin_overrides_the_model_candidate_type(self) -> None:
+        capture_id = self._capture("--as", "task", "--project", PROJECT_ID)
+
+        result = self._run(["classify", capture_id])
+
+        self.assertEqual(result["candidate_type"], "task")
+        self.assertEqual(result["routing"], "proposal:task")
+        self.assertEqual(self._classification(capture_id).candidate_type, "task")
+
     def test_pin_override_preserves_the_model_response_verbatim(self) -> None:
         """ADR-003: the pin changes the interpretation, never the evidence."""
         capture_id = self._capture("--as", "goal")
@@ -140,6 +150,16 @@ class PlanningClassificationTests(unittest.TestCase):
 
                 self.assertEqual(result["status"], "failed")
                 self.assertEqual(result["reason"], "model_response_invalid")
+
+    def test_the_model_may_still_propose_a_typed_task(self) -> None:
+        """A classifier `task` is an ordinary typed note, not a planning task."""
+        self.adapter = TypedAdapter("task")
+        capture_id = self._capture()
+
+        result = self._run(["classify", capture_id])
+
+        self.assertEqual(result["candidate_type"], "task")
+        self.assertEqual(result["routing"], "proposal:task")
 
 
 if __name__ == "__main__":

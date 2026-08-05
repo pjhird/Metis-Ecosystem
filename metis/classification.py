@@ -47,7 +47,9 @@ ROUTING = {
 }
 # The model proposes only these. Planning identity is the owner's intent, pinned
 # at capture, so `goal` and `project` are routable but never model-selectable
-# (ADR-021). Widening this set would let the classifier invent a goal.
+# (ADR-021). Widening this set would let the classifier invent a goal. `task`
+# stays selectable because a classifier task is an ordinary typed note; a
+# planning task exists only under a pin (ADR-022).
 RESPONSE_TYPES = frozenset(ROUTING) - {"goal", "project"}
 SENSITIVITIES = {"normal", "sensitive"}
 RESPONSE_KEYS = {"candidate_type", "sensitivity", "confidence"}

@@ -279,6 +279,8 @@ class ProposalServiceTests(unittest.TestCase):
                 state_updated_at=CAPTURED_AT,
                 failure_reason=None,
                 trace_id=CAPTURE_ID,
+                type_pin="",
+                parent_id="",
             )
         )
         self.state_store.begin_classification(CAPTURE_ID, CLASSIFIED_AT)

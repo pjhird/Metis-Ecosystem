@@ -360,6 +360,8 @@ class ProposalRecoveryTests(unittest.TestCase):
                 state_updated_at="2026-08-02T19:00:00Z",
                 failure_reason=None,
                 trace_id=CAPTURE_ID,
+                type_pin="",
+                parent_id="",
             )
         )
         self.state_store.begin_classification(

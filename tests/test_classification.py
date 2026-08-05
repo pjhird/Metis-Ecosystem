@@ -164,6 +164,8 @@ class ClassificationServiceTests(unittest.TestCase):
             state_updated_at=CAPTURED_AT,
             failure_reason=None,
             trace_id=CAPTURE_ID,
+            type_pin="",
+            parent_id="",
         )
         self.adapter = FakeModelAdapter(ModelResponse("test-model", RAW_RESPONSE))
         self.state_store = FakeStateStore(

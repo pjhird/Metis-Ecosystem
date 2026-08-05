@@ -830,59 +830,106 @@ Test: test_project_flag_without_task_pin_writes_no_evidence"
 - Consumes: `EvidenceRecord.type_pin` (Task 3).
 - Produces: `effective_type(candidate_type, evidence)` returning `"task"` for a pinned task while `RESPONSE_TYPES` still contains `"task"` for classifier-typed notes.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the tests**
+
+**Corrected (2026-08-05).** The snippets originally here called four helpers —
+`evidence_record`, `_capture_pinned_task`, `_classify`, `_classification_evidence` —
+that exist nowhere in the repo, so they were illustrative rather than runnable. The
+cases landed in `tests/test_planning_classify.py` in that module's existing CLI idiom
+(`_capture` / `_run` / `_classification`), which the Files list already sanctioned:
 
 ```python
 def test_task_pin_overrides_the_model_candidate_type(self) -> None:
-    evidence = evidence_record(type_pin="task", parent_id="proj.one")
+    capture_id = self._capture("--as", "task", "--project", PROJECT_ID)
 
-    self.assertEqual(effective_type("idea", evidence), "task")
+    result = self._run(["classify", capture_id])
+
+    self.assertEqual(result["candidate_type"], "task")
+    self.assertEqual(result["routing"], "proposal:task")
+    self.assertEqual(self._classification(capture_id).candidate_type, "task")
 
 def test_the_model_may_still_propose_a_typed_task(self) -> None:
     """A classifier `task` is an ordinary typed note, not a planning task."""
-    self.assertIn("task", RESPONSE_TYPES)
+    self.adapter = TypedAdapter("task")
+    capture_id = self._capture()
 
-def test_pin_override_preserves_the_model_response_verbatim(self) -> None:
-    capture_id = self._capture_pinned_task()
-    self._classify(capture_id, model_candidate_type="idea")
+    result = self._run(["classify", capture_id])
 
-    raw = self._classification_evidence(capture_id).read_text(encoding="utf-8")
-    self.assertIn('"candidate_type": "idea"', raw)
+    self.assertEqual(result["candidate_type"], "task")
+    self.assertEqual(result["routing"], "proposal:task")
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+`assertIn("task", RESPONSE_TYPES)` became the behavioural form above: it mirrors
+`test_the_model_may_not_select_a_planning_type` and asserts the observable outcome
+rather than the constant. The task variant of
+`test_pin_override_preserves_the_model_response_verbatim` was dropped — the goal
+variant already covers the mechanism and `effective_type` is type-agnostic.
 
-```bash
-/opt/miniconda3/bin/python3 -m unittest tests.test_classification -v
-```
+- [x] **Step 2: Run the tests**
 
-Expected: FAIL on the pinned-task fixture keyword.
+**There is no red-first for classification, and the plan was wrong to predict one.**
+Tasks 3–5 already wired the whole path: `PIN_TYPES` contains `task`
+(`metis/evidence.py:35`), `effective_type` is type-agnostic, `ROUTING["task"]` exists,
+and `RESPONSE_TYPES` already contains `task`. Both new cases pass against an untouched
+production tree — verified by running them before the Step 3 comment edit. Task 6's
+real red-to-green spine is the 83-failure fixture fallout below, which is genuinely
+red first.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `effective_type` already returns `evidence.type_pin or candidate_type`, so the only change is that `PIN_TYPES` now includes `task` (Task 3) and `ROUTING` already carries a `task` entry. Confirm `RESPONSE_TYPES` still subtracts only `{"goal", "project"}` and update the comment to say why `task` stays model-selectable:
 
 ```python
 # The model proposes only these. Planning identity is the owner's intent, pinned
 # at capture, so `goal` and `project` are routable but never model-selectable
-# (ADR-021). `task` stays selectable because a classifier task is an ordinary
-# typed note; a planning task exists only under a pin (ADR-022).
+# (ADR-021). Widening this set would let the classifier invent a goal. `task`
+# stays selectable because a classifier task is an ordinary typed note; a
+# planning task exists only under a pin (ADR-022).
 RESPONSE_TYPES = frozenset(ROUTING) - {"goal", "project"}
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+The existing sentence "Widening this set would let the classifier invent a goal" was
+kept rather than replaced; it states the constraint the rest of the comment explains.
+
+- [x] **Step 4: Run the tests to verify they pass**
 
 ```bash
 /opt/miniconda3/bin/python3 -m unittest tests.test_classification tests.test_proposal tests.test_proposal_recovery -v
 ```
 
-Expected: PASS. The full suite should now sit at roughly 33 failures — only the
-`filing.py` / `draft_notes.py` rename remains, for Tasks 7 and 8.
+Expected: PASS, and the full suite lands at **exactly 33** failures — `test_filing` 18,
+`test_planning_notes` 8, `test_audit` 4, `test_filing_integration` 3. Not "roughly": an
+approximate target is where a masked failure hides.
 
-- [ ] **Step 5: Commit**
+**`comm -13` alone cannot prove this task.** All 83 failures error inside `setUp` /
+`_classified()`, so those test bodies have not executed since Task 2. The fixture edits
+run them for the first time, and a test that flips `ERROR` → `FAIL` keeps its dotted id,
+stays in the after-set, and is reported by nothing. Assert forward set equality instead:
 
 ```bash
-git add metis/classification.py tests/test_classification.py tests/test_proposal.py tests/test_proposal_recovery.py
+comm -23 before_fail.txt after_fail.txt | wc -l   # removed: must be exactly 83
+comm -13 before_fail.txt after_fail.txt           # newly failing: must be empty
+wc -l < after_fail.txt                            # remaining: must be exactly 33
+```
+
+Diffing the full *collected* id set before and after closes the plan's other blind spot —
+a deleted passing test is invisible to a failing-set diff:
+
+```bash
+python -c "import unittest;ids=[]
+def walk(s):
+    [walk(t) if isinstance(t,unittest.TestSuite) else ids.append(t.id()) for t in s]
+walk(unittest.TestLoader().discover('tests'));print('\n'.join(sorted(ids)))" > all.txt
+```
+
+Result (2026-08-05): removed 83, newly failing 0, remaining 33, collected set identical
+at 459 before and after the fixture edits — no test added, removed, or renamed. All 83
+unblocked bodies passed on first execution.
+
+- [x] **Step 5: Commit**
+
+```bash
+git add metis/classification.py tests/test_classification.py tests/test_proposal.py tests/test_proposal_recovery.py tests/test_planning_classify.py docs/superpowers/plans/2026-08-04-phase-06b-planning-tasks.md
 git commit -m "feat(classify): let a task pin override the model candidate type
 
 Requirement: REQ-INTK-003
