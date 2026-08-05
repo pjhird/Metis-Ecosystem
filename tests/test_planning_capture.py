@@ -43,12 +43,22 @@ class PlanningCaptureCliTest(unittest.TestCase):
             return_code = main(argv, runtime_root=self.runtime_root)
         return return_code, stdout.getvalue()
 
-    def _usage_error(self, argv: list[str]) -> None:
-        with redirect_stderr(io.StringIO()):
+    def _usage_error(self, argv: list[str]) -> str:
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
             with self.assertRaises(SystemExit) as raised:
                 main(argv, runtime_root=self.runtime_root)
         self.assertEqual(raised.exception.code, 2)
+        # `parser.error` exits before any service is built, so nothing is written.
         self.assertFalse((self.runtime_root / "evidence").exists())
+        return stderr.getvalue()
+
+    def _only_evidence_metadata(self) -> dict:
+        directories = list((self.runtime_root / "evidence").iterdir())
+        self.assertEqual(len(directories), 1)
+        return json.loads(
+            (directories[0] / "meta.json").read_text(encoding="utf-8")
+        )
 
     def test_capture_as_project_requires_goal_flag(self) -> None:
         self._usage_error(["capture", "--as", "project", TEXT])
@@ -57,7 +67,8 @@ class PlanningCaptureCliTest(unittest.TestCase):
         self._usage_error(["capture", "--goal", GOAL_ID, TEXT])
         self._usage_error(["capture", "--as", "goal", "--goal", GOAL_ID, TEXT])
 
-    def test_as_accepts_only_goal_and_project(self) -> None:
+    def test_as_rejects_a_type_that_is_not_a_planning_pin(self) -> None:
+        """`task` joins the choices in ADR-022; a classifier type still does not."""
         self._usage_error(["capture", "--as", "idea", TEXT])
 
     def test_goal_flag_rejects_an_unsafe_identifier(self) -> None:
@@ -68,6 +79,36 @@ class PlanningCaptureCliTest(unittest.TestCase):
 
         self.assertEqual(return_code, 0)
         self.assertEqual(json.loads(stdout)["status"], "captured")
+
+    def test_capture_as_task_requires_project_flag_at_the_cli(self) -> None:
+        stderr = self._usage_error(["capture", "--as", "task", TEXT])
+
+        self.assertIn("--as task requires --project", stderr)
+
+    def test_project_flag_without_task_pin_writes_no_evidence(self) -> None:
+        stderr = self._usage_error(["capture", "--project", PROJECT_ID, TEXT])
+
+        self.assertIn("--project is only valid with --as task", stderr)
+
+    def test_project_flag_rejects_an_unsafe_identifier(self) -> None:
+        self._usage_error(
+            ["capture", "--as", "task", "--project", "../escape", TEXT]
+        )
+
+    def test_goal_flag_is_rejected_for_a_task(self) -> None:
+        """The two parent flags are not interchangeable; each names its own pin."""
+        self._usage_error(["capture", "--as", "task", "--goal", GOAL_ID, TEXT])
+
+    def test_capture_as_task_records_the_pin_and_parent_project(self) -> None:
+        return_code, stdout = self._run(
+            ["capture", "--as", "task", "--project", PROJECT_ID, TEXT]
+        )
+
+        self.assertEqual(return_code, 0)
+        self.assertEqual(json.loads(stdout)["status"], "captured")
+        metadata = self._only_evidence_metadata()
+        self.assertEqual(metadata["type_pin"], "task")
+        self.assertEqual(metadata["parent_id"], PROJECT_ID)
 
 
 class PlanningPinPersistenceTest(unittest.TestCase):
